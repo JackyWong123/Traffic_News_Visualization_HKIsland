@@ -17,9 +17,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 @st.cache_data
 def run_spatial_processing_pipeline():
     engine = TrafficIncidentEngine(
-        road_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_centerline.zip"), # 🎯 Changed to .zip
-        boundary_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_boundary.zip"), # 🎯 Changed to .zip
-        building_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_building.zip"), # 🎯 Changed to .zip
+        road_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_centerline.zip"),
+        boundary_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_boundary.zip"),
+        building_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_building.zip"),
         xml_path=os.path.join(BASE_DIR, "combined.xml"),
         distance_threshold=500
     )
@@ -28,13 +28,21 @@ def run_spatial_processing_pipeline():
 df_incidents, gdf_spatial = run_spatial_processing_pipeline()
 
 # ==========================================
-# BI-DIRECTIONAL SELECTION CONTROLLER
+# UI FEATURE 1: CLASSIFICATION DESIGN MAP
 # ==========================================
+CATEGORY_STYLES = {
+    "Accident": {"color": "red", "icon": "car", "prefix": "fa"},
+    "Road Works": {"color": "orange", "icon": "wrench", "prefix": "fa"},
+    "Congestion": {"color": "amber", "icon": "clock-o", "prefix": "fa"},
+    "Road Closure": {"color": "darkred", "icon": "ban", "prefix": "fa"},
+    "General Alert": {"color": "blue", "icon": "exclamation-circle", "prefix": "fa"}
+}
+
 # Initialize session state memory to track clicked incidents across both widgets
 if "selected_inc_id" not in st.session_state:
     st.session_state.selected_inc_id = None
 
-# Calculate a single global GPS marker point for every incident to display initially
+# Calculate representation coordinates for mapping
 if not df_incidents.empty and 'lat' not in df_incidents.columns:
     gdf_4326 = gdf_spatial.to_crs(epsg=4326)
     rep_points = []
@@ -42,7 +50,6 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
     for inc_id in df_incidents['IncidentID']:
         inc_geom = gdf_4326[gdf_4326['IncidentID'] == inc_id]
         if not inc_geom.empty:
-            # If a primary intersection point exists, use it; otherwise use the center of lines
             point_feats = inc_geom[inc_geom.geometry.geom_type == 'Point']
             if not point_feats.empty:
                 rep_pt = point_feats.iloc[0]['geometry']
@@ -54,6 +61,12 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
         df_rep = pd.DataFrame(rep_points)
         df_incidents = df_incidents.merge(df_rep, on='IncidentID', how='inner')
 
+# Identify row index mapping to support programmatic table auto-selection
+default_selection_idx = []
+if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
+    matched_row_idx = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].index[0]
+    default_selection_idx = [int(matched_row_idx)]
+
 # ==========================================
 # INTERACTIVE SCREEN LAYOUT GENERATION
 # ==========================================
@@ -61,23 +74,27 @@ col_table, col_map = st.columns([4, 5])
 
 with col_table:
     st.subheader("Traffic News Log")
-    st.caption("Select a row here or click an icon directly on the map canvas to project detailed street segments.")
+    st.caption("Select a row below or click an icon on the map canvas to project detailed street links.")
     
+    # UI FEATURE 2 & 3: SCROLLABLE, INTERACTIVE GRID CONTAINER WITH FIXED HEIGHT
     selection = st.dataframe(
         df_incidents,
         use_container_width=True,
         hide_index=True,
-        column_order=["IncidentID", "Location", "Details"],
+        column_order=["IncidentID", "Category", "Location", "Details"],
         on_select="rerun",
         selection_mode="single-row",
+        height=550,  # Forces vertical scrolling and perfectly matches map height block
+        selection_rows=default_selection_idx,
         column_config={
             "IncidentID": st.column_config.TextColumn("Case ID", width="small"),
-            "Location": st.column_config.TextColumn("Corridor", width="medium"),
-            "Details": st.column_config.TextColumn("Summary View", width="max")
+            "Category": st.column_config.TextColumn("Type", width="medium"),
+            "Location": st.column_config.TextColumn("Corridor Location Context", width="large"), # Long header activates horizontal scroll
+            "Details": st.column_config.TextColumn("Full Descriptive Summary Log View", width="max")
         }
     )
     
-    # Sync table selections into the master state controller
+    # Sync table selection events to the master controller state
     if selection and selection['selection']['rows']:
         row_idx = selection['selection']['rows'][0]
         table_selected_id = df_incidents.iloc[row_idx]['IncidentID']
@@ -88,22 +105,25 @@ with col_table:
 with col_map:
     st.subheader("Map Visualization")
     
-    # Standard base map container initialization
+    # Base map setup
     m = folium.Map(location=[22.28552, 114.15769], zoom_start=12, tiles="cartodbpositron")
     
-    # 🎯 STEP 1: Always render global overview icons for ALL active incidents
+    # 🎯 STEP 1: Render categorical icon representations across HKI map layout
     for _, row in df_incidents.iterrows():
-        # Highlight the selected icon in orange; leave unselected icons blue
         is_current = (row['IncidentID'] == st.session_state.selected_inc_id)
-        marker_color = 'orange' if is_current else 'blue'
+        style = CATEGORY_STYLES.get(row['Category'], CATEGORY_STYLES["General Alert"])
+        
+        # Give the active selection a distinct visual outline glow
+        icon_color = "white" if is_current else style["color"]
+        bg_color = "darkpurple" if is_current else style["color"]
         
         folium.Marker(
             location=[row['lat'], row['lng']],
-            icon=folium.Icon(color=marker_color, icon='exclamation-sign', prefix='glyphicon'),
-            tooltip=f"Case ID: {row['IncidentID']} ({row['Location']})"
+            icon=folium.Icon(color=bg_color, icon_color=icon_color, icon=style["icon"], prefix=style["prefix"]),
+            tooltip=f"[{row['Category']}] ID: {row['IncidentID']} - {row['Location']}"
         ).add_to(m)
         
-    # 🎯 STEP 2: Illuminate detailed lines/junctions ONLY for the active selection
+    # 🎯 STEP 2: Project detailed linear routes for selected cases
     if st.session_state.selected_inc_id:
         matched_shapes = gdf_spatial[gdf_spatial['IncidentID'] == st.session_state.selected_inc_id]
         
@@ -113,31 +133,28 @@ with col_map:
             for _, row in matched_shapes_4326.iterrows():
                 geom = row['geometry']
                 if geom is None or geom.geom_type == 'Point': 
-                    continue  # Points are already drawn as global markers
+                    continue
                     
                 folium.GeoJson(
                     geom,
                     style_function=lambda x: {'color': '#E63946', 'weight': 7, 'opacity': 0.9}
                 ).add_to(m)
             
-            # Automatically zoom and snap view to fit the illuminated route envelope
             total_bounds = matched_shapes_4326.total_bounds
             m.fit_bounds([[total_bounds[1], total_bounds[0]], [total_bounds[3], total_bounds[2]]])
     else:
-        # If nothing is selected, frame the map bounds to neatly show all overview icons
         if 'lat' in df_incidents.columns and not df_incidents.empty:
             m.fit_bounds([[df_incidents['lat'].min(), df_incidents['lng'].min()], 
                           [df_incidents['lat'].max(), df_incidents['lng'].max()]])
 
-    # Render out map widget and listen for marker click events
-    map_data = st_folium(m, width="100%", height=600, returned_objects=["last_object_clicked"])
+    # Render out map widget and listen for map-click coordinates
+    map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked"])
     
-    # 🎯 STEP 3: Listen for map icon selection triggers
+    # 🎯 STEP 3: Listen for map-marker click event assignments
     if map_data and map_data.get("last_object_clicked"):
         click_lat = map_data["last_object_clicked"]["lat"]
         click_lng = map_data["last_object_clicked"]["lng"]
         
-        # Match click coordinates back to our global incident database (with 10-meter error tolerance)
         coordinate_match = df_incidents[
             (abs(df_incidents['lat'] - click_lat) < 0.0001) & 
             (abs(df_incidents['lng'] - click_lng) < 0.0001)
@@ -156,4 +173,4 @@ if st.session_state.selected_inc_id:
     active_record = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].iloc[0]
     st.write("---")
     st.markdown(f"### Full Traffic News (Case ID: {active_record['IncidentID']})")
-    st.info(f"**Location Corridor:** {active_record['Location']}\n\n**Incident Description:** {active_record['Details']}")
+    st.info(f"**Incident Category Classification:** {active_record['Category']}\n\n**Location Corridor:** {active_record['Location']}\n\n**Incident Description:** {active_record['Details']}")
