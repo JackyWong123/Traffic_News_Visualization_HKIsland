@@ -2,7 +2,7 @@
 import xml.etree.ElementTree as ET
 import re
 import pandas as pd
-import geopandas as gpd
+import gpd = geopandas as gpd
 from shapely.geometry import MultiPoint
 from shapely.ops import nearest_points
 
@@ -20,6 +20,7 @@ class TrafficIncidentEngine:
         
     def initialize_spatial_basemaps(self):
         """Loads GIS layers directly out of compressed zip files."""
+        import geopandas as gpd
         self.road_df = gpd.read_file(f"zip://{self.road_path}")
         boundary_df = gpd.read_file(f"zip://{self.boundary_path}")
         building_df = gpd.read_file(f"zip://{self.building_path}") 
@@ -70,28 +71,34 @@ class TrafficIncidentEngine:
         else:
             return "General Alert"
 
-    def calculate_traffic_flow_heading(self, geom):
-        """Calculates true traffic heading from the first coordinate to the last coordinate (Strictly Code 3)."""
-        if geom is None:
-            return None
+    def is_correct_direction(self, geom, bound_target):
+        """Verifies if the coordinate sequence trajectory vector matches the target direction quadrant."""
+        if geom is None or not bound_target:
+            return True
+            
         if geom.geom_type == 'LineString':
             coords = list(geom.coords)
         elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
             coords = list(max(geom.geoms, key=lambda l: l.length).coords)
         else:
-            return None
+            return True
             
         if len(coords) >= 2:
-            # Target your logic: Calculate vector direction between first pair [0] and last pair [-1]
-            dx = coords[-1][0] - coords[0][0]
-            dy = coords[-1][1] - coords[0][1]
+            # Trajectory calculation from absolute first pair [0] to absolute last pair [-1]
+            dx = coords[-1][0] - coords[0][0] # Delta Easting
+            dy = coords[-1][1] - coords[0][1] # Delta Northing
             
-            # Match the dominant heading direction axis
-            if abs(dx) > abs(dy):
-                return "EAST" if dx > 0 else "WEST"
-            else:
-                return "NORTH" if dy > 0 else "SOUTH"
-        return None
+            # Match coordinate trends against geographic boundaries without strict axis snapping
+            if bound_target == "WEST" and dx < 0:
+                return True
+            if bound_target == "EAST" and dx > 0:
+                return True
+            if bound_target == "SOUTH" and dy < 0:
+                return True
+            if bound_target == "NORTH" and dy > 0:
+                return True
+            return False
+        return True
 
     @staticmethod
     def _get_xml_text(message_element, tag_name):
@@ -101,7 +108,8 @@ class TrafficIncidentEngine:
         return ""
 
     def process_active_incidents(self):
-        """Parses XML logs and handles explicit 1 vs 3 directional criteria."""
+        """Parses XML logs and applies strict coordinate sequence trajectory logic."""
+        import geopandas as gpd
         if self.road_df is None:
             self.initialize_spatial_basemaps()
 
@@ -133,7 +141,7 @@ class TrafficIncidentEngine:
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
 
-            # Translate news destinations into target tracking compass bounds
+            # Map descriptive direction targets to vector bounds
             bound_target = None
             if any(kw in content_upper or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND"]):
                 bound_target = "WEST"
@@ -177,19 +185,15 @@ class TrafficIncidentEngine:
                             if dir_col and pd.notna(road_feat[dir_col]):
                                 dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                                 
-                            # Value 1 = Two-Way. Keep it immediately.
                             if not bound_target or dir_val == '1':
                                 valid_indices.append(idx)
                                 continue
                                 
-                            # Value 3 = One-Way. Run your coordinate check.
-                            if dir_val == '3':
-                                seg_heading = self.calculate_traffic_flow_heading(geom)
-                                if seg_heading == bound_target:
-                                    valid_indices.append(idx)
+                            if dir_val == '3' and self.is_correct_direction(geom, bound_target):
+                                valid_indices.append(idx)
                                     
-                        if valid_indices:
-                            matched_roads = matched_roads.loc[valid_indices]
+                        matched_roads = matched_roads.loc[valid_indices]
+                        if not matched_roads.empty:
                             for _, road_feat in matched_roads.iterrows():
                                 matched_any_hki_road = True
                                 spatial_features_list.append({
@@ -208,7 +212,7 @@ class TrafficIncidentEngine:
 
             dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']), None)
 
-            # ST_TRACKER CARRIAGEWAY VALIDATION FILTER LOOP
+            # 🎯 ST_TRACKER CARRIAGEWAY VALIDATION FILTER LOOP
             valid_indices = []
             for idx, road_feat in matched_roads.iterrows():
                 geom = road_feat['GEOMETRY']
@@ -218,24 +222,23 @@ class TrafficIncidentEngine:
                     valid_indices.append(idx)
                     continue
                 
-                # Float-safe casting cleanup (handles 1.0 or 3.0 flawlessly)
                 dir_val = "1"
                 if dir_col and pd.notna(road_feat[dir_col]):
                     dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                 
-                # Rule 1: Code 1 means permitted in both directions. Keep it.
+                # Code 1: Combined Two-Way. Always retain.
                 if dir_val == '1':
                     valid_indices.append(idx)
                     continue
                     
-                # Rule 2: Code 3 means permitted in digitized coordinates sequence direction only.
-                if dir_val == '3':
-                    seg_heading = self.calculate_traffic_flow_heading(geom)
-                    if seg_heading == bound_target:
-                        valid_indices.append(idx)
+                # Code 3: One-Way. Run coordinate quadrant check.
+                if dir_val == '3' and self.is_correct_direction(geom, bound_target):
+                    valid_indices.append(idx)
                         
-            if valid_indices:
-                matched_roads = matched_roads.loc[valid_indices]
+            # 🎯 THE FIX: Always slice the dataframe to drop the incorrect bound
+            matched_roads = matched_roads.loc[valid_indices]
+            if matched_roads.empty:
+                continue
 
             target_road_geom = matched_roads.geometry.unary_union
             pts_to_check = []
