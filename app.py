@@ -20,7 +20,7 @@ st.markdown("""
             margin-bottom: 24px;
         }
     </style>
-""", unsafe_with_html=True)
+""", unsafe_allow_html=True)
 
 st.title("Traffic News Visualization for Hong Kong Island")
 
