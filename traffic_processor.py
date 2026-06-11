@@ -70,7 +70,7 @@ class TrafficIncidentEngine:
             return "General Alert"
 
     def is_correct_direction(self, geom, bound_compass, target_geom):
-        """Verifies direction via Destination Proximity (Primary) and Compass Vector (Fallback)."""
+        """Topological Anti-Vector Engine: Identifies and drops lines moving the exact wrong way."""
         if geom is None: return True
         
         if geom.geom_type == 'LineString':
@@ -82,24 +82,25 @@ class TrafficIncidentEngine:
             
         if len(coords) < 2: return True
         
-        # Method A: Dynamic Destination Proximity (d_end < d_start)
+        # Method A: Destination Proximity Anti-Vector
         if target_geom is not None:
             start_pt = Point(coords[0])
             end_pt = Point(coords[-1])
-            if end_pt.distance(target_geom) < start_pt.distance(target_geom):
-                return True
-            if not bound_compass:
-                return False # Drop the opposite direction immediately
-                
-        # Method B: Global Compass Vector Analysis
+            # If the end of the segment is moving significantly away from the destination, drop it
+            if end_pt.distance(target_geom) > start_pt.distance(target_geom) + 15:
+                return False
+            return True
+            
+        # Method B: Global Compass Anti-Vector
         if bound_compass:
-            dx = coords[-1][0] - coords[0][0]
-            dy = coords[-1][1] - coords[0][1]
-            if bound_compass == "WEST" and dx < 0: return True
-            if bound_compass == "EAST" and dx > 0: return True
-            if bound_compass == "SOUTH" and dy < 0: return True
-            if bound_compass == "NORTH" and dy > 0: return True
-            return False
+            dx = coords[-1][0] - coords[0][0] # Easting Delta
+            dy = coords[-1][1] - coords[0][1] # Northing Delta
+            
+            # Drop ONLY if it strictly moves in the opposite opposing direction
+            if bound_compass == "WEST" and dx > 15: return False
+            if bound_compass == "EAST" and dx < -15: return False
+            if bound_compass == "SOUTH" and dy > 15: return False
+            if bound_compass == "NORTH" and dy < -15: return False
             
         return True
 
@@ -142,15 +143,10 @@ class TrafficIncidentEngine:
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
 
-            # ========================================================
-            # 🎯 1. ADVANCED DIRECTION TARGET ENGINE
-            # ========================================================
+            # 🎯 EXTRACT TARGET COMPASS BOUND
             bound_compass = None
-            target_geom = None
             text_pool = content_upper + " " + location_en
-            
-            # Extract standard macro compass phrases
-            if any(kw in text_pool for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND"]):
+            if any(kw in text_pool for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL"]):
                 bound_compass = "WEST"
             elif any(kw in text_pool for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND"]):
                 bound_compass = "EAST"
@@ -159,7 +155,8 @@ class TrafficIncidentEngine:
             elif any(kw in text_pool for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR"]):
                 bound_compass = "NORTH"
 
-            # Dynamically identify exact destination names based on natural language structure
+            # 🎯 EXTRACT TARGET DESTINATION ENTITY
+            target_geom = None
             potential_targets = []
             for m in re.finditer(r'([A-Z0-9\s\-]+)\s+BOUND', text_pool):
                 potential_targets.append(m.group(1).strip())
@@ -170,22 +167,13 @@ class TrafficIncidentEngine:
                 clean_target = re.split(r'\b(IS|NEAR|BETWEEN|AND|PART|THE)\b', target)[0].strip()
                 if not clean_target or clean_target in ["EAST", "WEST", "SOUTH", "NORTH", "CENTRAL"]: continue
                 
-                # Fetch target's actual geometry center
                 if clean_target in self.landmark_cache:
                     target_geom = self.landmark_cache[clean_target]
                     break
                 elif clean_target in self.road_names_cache:
                     target_geom = self.road_df[self.road_df['STREET_ENAME'] == clean_target].geometry.unary_union.centroid
                     break
-                else:
-                    for r in sorted(list(self.road_names_cache), key=len, reverse=True):
-                        if r in clean_target:
-                            target_geom = self.road_df[self.road_df['STREET_ENAME'] == r].geometry.unary_union.centroid
-                            break
-                if target_geom:
-                    break
 
-            # Resolve road location entity
             main_road = None
             if location_en in self.road_names_cache:
                 main_road = location_en
@@ -198,16 +186,6 @@ class TrafficIncidentEngine:
             if location_en != "BUSY ROAD SECTIONS" and not main_road:
                 continue
 
-            # ========================================================
-            # 🎯 2. STRICT TRAVEL_DIR COLUMN ANCHOR
-            # ========================================================
-            # Hardcoded exact string match to stop mis-assigning columns
-            dir_col = None
-            for col in self.road_df.columns:
-                if col in ['TRAVEL_DIR', 'TRAVEL_DIRECTION', 'TRAFFIC_DIR', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']:
-                    dir_col = col
-                    break
-
             # TRACK B: BROADCAST MODE
             if location_en == "BUSY ROAD SECTIONS":
                 sorted_roads = sorted(list(self.road_names_cache), key=len, reverse=True)
@@ -219,27 +197,18 @@ class TrafficIncidentEngine:
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
                         matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         
-                        valid_indices = []
-                        for idx, road_feat in matched_roads.iterrows():
-                            geom = road_feat['GEOMETRY']
-                            if geom is None: continue
+                        # Apply Topological Filter Fallback
+                        if bound_compass or target_geom:
+                            dir_filtered = []
+                            for idx, road_feat in matched_roads.iterrows():
+                                if self.is_correct_direction(road_feat['GEOMETRY'], bound_compass, target_geom):
+                                    dir_filtered.append(idx)
                             
-                            dir_val = "1"
-                            if dir_col and pd.notna(road_feat[dir_col]):
-                                dir_val = str(road_feat[dir_col]).strip().split('.')[0]
+                            # Fallback Magic: Only slice the dataframe if we successfully isolated specific lanes. 
+                            # If we found zero (a local two-way street digitized backwards), ignore the filter and keep it.
+                            if len(dir_filtered) > 0 and len(dir_filtered) < len(matched_roads):
+                                matched_roads = matched_roads.loc[dir_filtered]
                                 
-                            if not bound_compass and target_geom is None:
-                                valid_indices.append(idx)
-                                continue
-                                
-                            if dir_val == '1':
-                                valid_indices.append(idx)
-                                continue
-                                
-                            if dir_val == '3' and self.is_correct_direction(geom, bound_compass, target_geom):
-                                valid_indices.append(idx)
-                                    
-                        matched_roads = matched_roads.loc[valid_indices]
                         if not matched_roads.empty:
                             for _, road_feat in matched_roads.iterrows():
                                 matched_any_hki_road = True
@@ -257,30 +226,16 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            valid_indices = []
-            for idx, road_feat in matched_roads.iterrows():
-                geom = road_feat['GEOMETRY']
-                if geom is None: continue
+            # Apply Topological Filter Fallback
+            if bound_compass or target_geom:
+                dir_filtered = []
+                for idx, road_feat in matched_roads.iterrows():
+                    if self.is_correct_direction(road_feat['GEOMETRY'], bound_compass, target_geom):
+                        dir_filtered.append(idx)
                 
-                if not bound_compass and target_geom is None:
-                    valid_indices.append(idx)
-                    continue
-                
-                dir_val = "1"
-                if dir_col and pd.notna(road_feat[dir_col]):
-                    dir_val = str(road_feat[dir_col]).strip().split('.')[0] # Converts 3.0 safely to '3'
-                
-                if dir_val == '1':
-                    valid_indices.append(idx)
-                    continue
-                    
-                if dir_val == '3' and self.is_correct_direction(geom, bound_compass, target_geom):
-                    valid_indices.append(idx)
-                        
-            # Execute physical drop of the incorrect vector bound
-            matched_roads = matched_roads.loc[valid_indices]
-            if matched_roads.empty:
-                continue
+                # Fallback Magic: Only slice if we successfully isolated lanes without deleting the entire road.
+                if len(dir_filtered) > 0 and len(dir_filtered) < len(matched_roads):
+                    matched_roads = matched_roads.loc[dir_filtered]
 
             target_road_geom = matched_roads.geometry.unary_union
             pts_to_check = []
