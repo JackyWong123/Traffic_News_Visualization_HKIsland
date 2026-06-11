@@ -22,19 +22,16 @@ class TrafficIncidentEngine:
         """Loads GIS layers directly out of compressed zip files."""
         self.road_df = gpd.read_file(f"zip://{self.road_path}")
         boundary_df = gpd.read_file(f"zip://{self.boundary_path}")
-        building_df = gpd.read_file(f"zip://{self.building_path}")
+        building_df = gpd.read_file(f"zip://{self.building_path}") 
         
-        # Force column headers to uppercase to handle varied GeoJSON field exports
         self.road_df.columns = self.road_df.columns.str.upper()
         boundary_df.columns = boundary_df.columns.str.upper()
         building_df.columns = building_df.columns.str.upper()
         
-        # Assign "GEOMETRY" as the active geometry column name prior to setting CRS systems
         self.road_df = self.road_df.set_geometry("GEOMETRY").set_crs(epsg=2326, allow_override=True)
         boundary_df = boundary_df.set_geometry("GEOMETRY").set_crs(epsg=2326, allow_override=True)
         building_df = building_df.set_geometry("GEOMETRY").set_crs(epsg=2326, allow_override=True)
             
-        # Index multi-building sites safely omitting empty or null records
         for _, feature in boundary_df.iterrows():
             geom = feature['GEOMETRY']
             if geom is None: continue
@@ -46,7 +43,6 @@ class TrafficIncidentEngine:
                     if len(val) > 3 and val not in ["NAN", "<NA>"]: 
                         self.landmark_cache[val] = centroid
 
-        # Index standalone towers
         for _, feature in building_df.iterrows():
             geom = feature['GEOMETRY']
             if geom is None: continue
@@ -58,9 +54,21 @@ class TrafficIncidentEngine:
                     if len(val) > 3 and val not in ["NAN", "<NA>"] and val not in self.landmark_cache: 
                         self.landmark_cache[val] = centroid
 
-        # Index known clipped road networks [cite: 201, 210]
         if 'STREET_ENAME' in self.road_df.columns:
             self.road_names_cache = set(self.road_df['STREET_ENAME'].dropna().str.upper().str.strip())
+
+    def classify_incident(self, content_upper):
+        """ENGINE FEATURE: Categorizes traffic reports based on text pattern matching."""
+        if any(kw in content_upper for kw in ["ACCIDENT", "COLLISION", "CAR CRASH"]):
+            return "Accident"
+        elif any(kw in content_upper for kw in ["ROAD WORKS", "ROADWORKS", "MAINTENANCE", "REPAIR"]):
+            return "Road Works"
+        elif any(kw in content_upper for kw in ["TRAFFIC QUEUE", "CONGESTION", "BUSY", "SLOW TRAFFIC"]):
+            return "Congestion"
+        elif any(kw in content_upper for kw in ["CLOSED", "POLICE INVESTIGATION", "BLOCKAGE"]):
+            return "Road Closure"
+        else:
+            return "General Alert"
 
     @staticmethod
     def _get_xml_text(message_element, tag_name):
@@ -100,8 +108,10 @@ class TrafficIncidentEngine:
                 continue
                 
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
+            
+            # Engine Rule: Determine Category classification mapping
+            category = self.classify_incident(content_upper)
 
-            # UPGRADE 1: Extract main street from complex location names (e.g. "SMITHFIELD AND CATCHICK STREET")
             main_road = None
             if location_en in self.road_names_cache:
                 main_road = location_en
@@ -133,7 +143,7 @@ class TrafficIncidentEngine:
                             })
                 
                 if matched_any_hki_road:
-                    incident_records.append({'IncidentID': inc_id, 'Location': location_en, 'Details': content_en})
+                    incident_records.append({'IncidentID': inc_id, 'Category': category, 'Location': location_en, 'Details': content_en})
                 continue
 
             # TRACK A: LOCALIZED MODE
@@ -144,36 +154,29 @@ class TrafficIncidentEngine:
             target_road_geom = matched_roads.geometry.unary_union
             pts_to_check = []
 
-            # Find cross streets mentioned in location or text description
             sorted_roads = sorted(list(self.road_names_cache), key=len, reverse=True)
             for cross_road in sorted_roads:
                 if cross_road == main_road: continue
-                
                 if cross_road in active_text_block or cross_road in location_en:
                     cross_feats = self.road_df[self.road_df['STREET_ENAME'] == cross_road]
                     if not cross_feats.empty:
                         cross_geom = cross_feats.geometry.unary_union
                         intersection = target_road_geom.intersection(cross_geom)
-                        
                         if not intersection.is_empty:
                             pts_to_check.append(intersection.centroid)
                         else:
                             p1, p2 = nearest_points(target_road_geom, cross_geom)
                             pts_to_check.append(p1)
 
-            # UPGRADE 2: JUNCTION PINNING CONTROLLER
-            is_junction = "JUNCTION" in content_upper or "JUNCTION" in location_en or "JUNCTION" in main_road
-            
+            is_junction = "JUNCTION" in content_upper or "JUNCTION" in location_en
             if is_junction and pts_to_check:
-                # Direct Pin Mode: Save the intersection point directly to the spatial features array
                 spatial_features_list.append({
                     'IncidentID': inc_id, 'RoadName': main_road, 
                     'RouteID': 'INTERSECTION_NODE', 'geometry': pts_to_check[0]
                 })
-                incident_records.append({'IncidentID': inc_id, 'Location': location_en, 'Details': content_en})
+                incident_records.append({'IncidentID': inc_id, 'Category': category, 'Location': location_en, 'Details': content_en})
                 continue
 
-            # Standard corridor fallback container if it isn't a single point junction
             if landmark_en in self.landmark_cache: pts_to_check.append(self.landmark_cache[landmark_en])
             if between_en in self.landmark_cache: pts_to_check.append(self.landmark_cache[between_en])
 
@@ -203,7 +206,7 @@ class TrafficIncidentEngine:
                         spatial_match_count += 1
                         
             if spatial_match_count > 0:
-                incident_records.append({'IncidentID': inc_id, 'Location': location_en, 'Details': content_en})
+                incident_records.append({'IncidentID': inc_id, 'Category': category, 'Location': location_en, 'Details': content_en})
 
         df_incidents = pd.DataFrame(incident_records).drop_duplicates(subset=['IncidentID'])
         if spatial_features_list:
