@@ -23,15 +23,21 @@ st.markdown("""
         .table-header {
             font-weight: bold;
             background-color: #F0F2F6;
-            padding: 8px;
-            border-radius: 4px;
+            padding: 10px;
+            border-radius: 6px;
             margin-bottom: 8px;
         }
-        .table-row {
-            padding: 8px 4px;
+        .selected-row-box {
+            border: 2px solid #E63946;
+            background-color: #FFF5F5;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        .standard-row-box {
             border-bottom: 1px solid #EDEDED;
-            display: flex;
-            align-items: center;
+            padding: 10px 4px;
+            margin-bottom: 2px;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -54,7 +60,7 @@ def run_spatial_processing_pipeline():
 raw_incidents, gdf_spatial = run_spatial_processing_pipeline()
 
 # ==========================================
-# BI-DIRECTIONAL SELECTION & STATE MEMORY
+# BI-DIRECTIONAL SELECTION & STATE LOCKS
 # ==========================================
 if "selected_inc_id" not in st.session_state:
     st.session_state.selected_inc_id = None
@@ -95,19 +101,19 @@ CATEGORY_STYLES = {
 # ==========================================
 # INTERACTIVE SCREEN LAYOUT GENERATION
 # ==========================================
-col_table, col_map = st.columns([9, 10])
+col_table, col_map = st.columns([10, 9])
 
 with col_table:
     st.markdown("<div class='unified-header'><h3>Traffic News Log</h3></div>", unsafe_allow_html=True)
     
-    # 🔍 EXPLICIT SEARCH & SORT CONTROLS
+    # SEARCH & SORT CONTROLS
     col_search, col_sort = st.columns([2, 1])
     with col_search:
-        search_query = st.text_input("🔍 Search logs (ID, Location, or Keyword)", "", placeholder="e.g. Wan Chai")
+        search_query = st.text_input("Search logs (ID, Location, or Keyword)", "", placeholder="Type here to filter...")
     with col_sort:
         sort_option = st.selectbox("Sort By", ["Default", "Case ID", "Incident Type", "Location"])
 
-    # Apply Search Filter Rules
+    # Apply Search Rules
     df_filtered = df_incidents.copy()
     if search_query:
         df_filtered = df_filtered[
@@ -117,7 +123,7 @@ with col_table:
             df_filtered['Details'].str.contains(search_query, case=False, na=False)
         ]
 
-    # Apply Explicit Sorting Rules
+    # Apply Sorting Rules
     if sort_option == "Case ID":
         df_filtered = df_filtered.sort_values(by="IncidentID", ascending=True)
     elif sort_option == "Incident Type":
@@ -125,21 +131,27 @@ with col_table:
     elif sort_option == "Location":
         df_filtered = df_filtered.sort_values(by="Location", ascending=True)
 
-    # 📋 TRADITIONAL TABLE HEADERS
+    # 🎯 DYNAMIC TOP-PINNING LOGIC: Force the selected incident to the absolute top of the table view
+    if st.session_state.selected_inc_id and st.session_state.selected_inc_id in df_filtered['IncidentID'].values:
+        selected_row = df_filtered[df_filtered['IncidentID'] == st.session_state.selected_inc_id]
+        remaining_rows = df_filtered[df_filtered['IncidentID'] != st.session_state.selected_inc_id]
+        df_filtered = pd.concat([selected_row, remaining_rows]).reset_index(drop=True)
+
+    # TABLE HEADERS
     st.markdown("""
         <div class='table-header'>
             <table style='width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px;'>
                 <tr>
-                    <td style='width:18%; font-weight:bold; color:#333;'>Case ID</td>
-                    <td style='width:17%; font-weight:bold; color:#333;'>Type</td>
+                    <td style='width:15%; font-weight:bold; color:#333;'>Case ID</td>
+                    <td style='width:15%; font-weight:bold; color:#333;'>Type</td>
                     <td style='width:25%; font-weight:bold; color:#333;'>Corridor Context</td>
-                    <td style='width:40%; font-weight:bold; color:#333;'>Full Description Log</td>
+                    <td style='width:45%; font-weight:bold; color:#333;'>Full Description Log</td>
                 </tr>
             </table>
         </div>
     """, unsafe_allow_html=True)
 
-    # 🎯 WRAPPED INTERACTIVE TABLE DATA ROWS
+    # TRADITIONAL WRAPPED DATA ROWS
     with st.container(height=450):
         if df_filtered.empty:
             st.info("No matching traffic incidents found.")
@@ -147,26 +159,29 @@ with col_table:
             for _, row in df_filtered.iterrows():
                 is_selected = (row['IncidentID'] == st.session_state.selected_inc_id)
                 
-                # Setup a layout row using native columns to handle text wrapping flawlessly
-                r_cols = st.columns([18, 17, 25, 40])
+                # Apply high-visibility red bounding container if selected
+                row_class = "selected-row-box" if is_selected else "standard-row-box"
                 
-                # Column 1: Action Select Button acting as the Case ID cell
-                btn_label = f"👉 {row['IncidentID']}" if is_selected else str(row['IncidentID'])
+                st.markdown(f"<div class='{row_class}'>", unsafe_allow_html=True)
+                r_cols = st.columns([15, 15, 25, 45])
+                
+                # Column 1: Row Selection Button
+                btn_label = f"🎯 {row['IncidentID']}" if is_selected else str(row['IncidentID'])
                 if r_cols[0].button(btn_label, key=f"row_id_{row['IncidentID']}", use_container_width=True, type="primary" if is_selected else "secondary"):
                     st.session_state.selected_inc_id = row['IncidentID']
                     st.rerun()
                 
-                # Column 2, 3, & 4: Markdown strings that wrap automatically when long
+                # Columns 2, 3, & 4: Markdown strings with auto-wrapping lines
                 r_cols[1].markdown(f"<div style='padding-top:6px; font-size:13px;'>{row['Category']}</div>", unsafe_allow_html=True)
                 r_cols[2].markdown(f"<div style='padding-top:6px; font-size:13px; font-weight:bold;'>{row['Location']}</div>", unsafe_allow_html=True)
-                r_cols[3].markdown(f"<div style='padding-top:6px; font-size:13px; line-height:1.4; color:#444;'>{row['Details']}</div>", unsafe_allow_html=True)
+                r_cols[3].markdown(f"<div style='padding-top:6px; font-size:13px; line-height:1.4; color:#333;'>{row['Details']}</div>", unsafe_allow_html=True)
                 
-                st.markdown("<div class='table-row'></div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
 
 with col_map:
     st.markdown("<div class='unified-header'><h3>Map Visualization</h3></div>", unsafe_allow_html=True)
     
-    # Establish persistent map coordinates BEFORE loading map canvas to stop flying popups
+    # Establish stationary view coordinates before drawing map to avoid layout tearing
     map_center = [22.28552, 114.15769]
     zoom_level = 11
     
@@ -182,22 +197,15 @@ with col_map:
         is_current = (row['IncidentID'] == st.session_state.selected_inc_id)
         style = CATEGORY_STYLES.get(row['Category'], CATEGORY_STYLES["General Alert"])
         
+        # Selected pin changes to high-visibility darkpurple
         bg_color = "darkpurple" if is_current else style["color"]
-        icon_color = "white"
         
-        popup_html = f"""
-        <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 3px;'>
-            <b style='color: #222;'>📍 {row['Location']}</b><br>
-            <span style='color: #E63946; font-weight: bold;'>• {row['Category']}</span><br>
-            <p style='margin: 5px 0 0 0; color: #555; font-size: 11px; line-height:1.3;'>Full text is completely wrapped in the log table.</p>
-        </div>
-        """
-        
+        # 🎯 POPUP FIX: No popup parameter attached to the Marker container.
+        # This allows the mouse click to pass cleanly straight to st_folium's callback loop.
         folium.Marker(
             location=[row['lat'], row['lng']],
-            icon=folium.Icon(color=bg_color, icon_color=icon_color, icon=style["icon"], prefix=style["prefix"]),
-            tooltip=f"ID: {row['IncidentID']} - {row['Location']}",
-            popup=folium.Popup(popup_html, max_width=250)
+            icon=folium.Icon(color=bg_color, icon_color="white", icon=style["icon"], prefix=style["prefix"]),
+            tooltip=f"ID: {row['IncidentID']} - {row['Location']}"
         ).add_to(m)
         
     if st.session_state.selected_inc_id:
@@ -209,9 +217,9 @@ with col_map:
                 if geom is None or geom.geom_type == 'Point': continue
                 folium.GeoJson(geom, style_function=lambda x: {'color': '#E63946', 'weight': 7, 'opacity': 0.9}).add_to(m)
 
-    map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked"])
+    map_data = st_folium(m, width="100%", height=530, returned_objects=["last_object_clicked"])
     
-    # Nearest-Neighbor matching engine overrides float rounding problems completely
+    # Nearest-Neighbor matching handles coordinate synchronization instantly
     if map_data and map_data.get("last_object_clicked") and not df_incidents.empty:
         click_lat = map_data["last_object_clicked"]["lat"]
         click_lng = map_data["last_object_clicked"]["lng"]
