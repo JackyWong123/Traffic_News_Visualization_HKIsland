@@ -2,7 +2,7 @@
 import xml.etree.ElementTree as ET
 import re
 import pandas as pd
-import gpd = geopandas as gpd
+import geopandas as gpd  # 🎯 FIXED SYNTAX TYPO HERE
 from shapely.geometry import MultiPoint
 from shapely.ops import nearest_points
 
@@ -20,7 +20,6 @@ class TrafficIncidentEngine:
         
     def initialize_spatial_basemaps(self):
         """Loads GIS layers directly out of compressed zip files."""
-        import geopandas as gpd
         self.road_df = gpd.read_file(f"zip://{self.road_path}")
         boundary_df = gpd.read_file(f"zip://{self.boundary_path}")
         building_df = gpd.read_file(f"zip://{self.building_path}") 
@@ -109,7 +108,6 @@ class TrafficIncidentEngine:
 
     def process_active_incidents(self):
         """Parses XML logs and applies strict coordinate sequence trajectory logic."""
-        import geopandas as gpd
         if self.road_df is None:
             self.initialize_spatial_basemaps()
 
@@ -185,6 +183,7 @@ class TrafficIncidentEngine:
                             if dir_col and pd.notna(road_feat[dir_col]):
                                 dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                                 
+                            # Value 1 = Two-Way. Keep it immediately.
                             if not bound_target or dir_val == '1':
                                 valid_indices.append(idx)
                                 continue
@@ -212,7 +211,7 @@ class TrafficIncidentEngine:
 
             dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']), None)
 
-            # 🎯 ST_TRACKER CARRIAGEWAY VALIDATION FILTER LOOP
+            # ST_TRACKER CARRIAGEWAY VALIDATION FILTER LOOP
             valid_indices = []
             for idx, road_feat in matched_roads.iterrows():
                 geom = road_feat['GEOMETRY']
@@ -235,7 +234,6 @@ class TrafficIncidentEngine:
                 if dir_val == '3' and self.is_correct_direction(geom, bound_target):
                     valid_indices.append(idx)
                         
-            # 🎯 THE FIX: Always slice the dataframe to drop the incorrect bound
             matched_roads = matched_roads.loc[valid_indices]
             if matched_roads.empty:
                 continue
