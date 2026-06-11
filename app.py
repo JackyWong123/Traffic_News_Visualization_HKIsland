@@ -76,7 +76,6 @@ with col_table:
     st.subheader("Traffic News Log")
     st.caption("Select a row below or click an icon on the map canvas to project detailed street links.")
     
-    # UI FEATURE 2 & 3: SCROLLABLE, INTERACTIVE GRID CONTAINER WITH FIXED HEIGHT
     selection = st.dataframe(
         df_incidents,
         use_container_width=True,
@@ -84,12 +83,13 @@ with col_table:
         column_order=["IncidentID", "Category", "Location", "Details"],
         on_select="rerun",
         selection_mode="single-row",
-        height=550,  # Forces vertical scrolling and perfectly matches map height block
-        selection_rows=default_selection_idx,
+        height=550, 
+        # 🎯 THE FIX: Swapped out selection_rows for the correct dictionary format
+        selection_default={"selection": {"rows": default_selection_idx}},
         column_config={
             "IncidentID": st.column_config.TextColumn("Case ID", width="small"),
             "Category": st.column_config.TextColumn("Type", width="medium"),
-            "Location": st.column_config.TextColumn("Corridor Location Context", width="large"), # Long header activates horizontal scroll
+            "Location": st.column_config.TextColumn("Corridor Location Context", width="large"), 
             "Details": st.column_config.TextColumn("Full Descriptive Summary Log View", width="max")
         }
     )
