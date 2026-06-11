@@ -37,23 +37,17 @@ def run_spatial_processing_pipeline():
     )
     return engine.process_active_incidents()
 
-df_incidents, gdf_spatial = run_spatial_processing_pipeline()
+raw_incidents, gdf_spatial = run_spatial_processing_pipeline()
 
 # ==========================================
-# BI-DIRECTIONAL SELECTION CONTROLLER
+# STATIC DATA PREPARATION (LOCKS ROW INDICES)
 # ==========================================
+# We process coordinates immediately to ensure row index integers never shift
 if "selected_inc_id" not in st.session_state:
     st.session_state.selected_inc_id = None
 
-CATEGORY_STYLES = {
-    "Accident": {"color": "red", "icon": "car", "prefix": "fa"},
-    "Road Works": {"color": "orange", "icon": "wrench", "prefix": "fa"},
-    "Congestion": {"color": "amber", "icon": "clock-o", "prefix": "fa"},
-    "Road Closure": {"color": "darkred", "icon": "ban", "prefix": "fa"},
-    "General Alert": {"color": "blue", "icon": "exclamation-circle", "prefix": "fa"}
-}
+df_incidents = raw_incidents.copy()
 
-# Snap representation coordinates precisely onto the road lines
 if not df_incidents.empty and 'lat' not in df_incidents.columns:
     gdf_4326 = gdf_spatial.to_crs(epsg=4326)
     rep_points = []
@@ -76,20 +70,28 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
         df_rep = pd.DataFrame(rep_points)
         df_incidents = df_incidents.merge(df_rep, on='IncidentID', how='inner')
 
-# Sync state index from Map interactions back to Table highlighting
+# Stable index resolution for cross-component highlighting
 default_selection_idx = []
 if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
     matched_row_idx = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].index[0]
     default_selection_idx = [int(matched_row_idx)]
 
-# Grid Columns Layout Setup
+CATEGORY_STYLES = {
+    "Accident": {"color": "red", "icon": "car", "prefix": "fa"},
+    "Road Works": {"color": "orange", "icon": "wrench", "prefix": "fa"},
+    "Congestion": {"color": "amber", "icon": "clock-o", "prefix": "fa"},
+    "Road Closure": {"color": "darkred", "icon": "ban", "prefix": "fa"},
+    "General Alert": {"color": "blue", "icon": "exclamation-circle", "prefix": "fa"}
+}
+
+# ==========================================
+# INTERACTIVE SCREEN LAYOUT GENERATION
+# ==========================================
 col_table, col_map = st.columns([4, 5])
 
 with col_table:
-    # 🎯 FIX ISSUE 1: Emojis removed from header layout
     st.markdown("<div class='unified-header'><h3>Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Click anywhere on a row to isolate the incident footprint.</p></div>", unsafe_allow_html=True)
     
-    # 🎯 FIX ISSUE 4 & 5: Dynamic Key forces table to update its highlight immediately on map clicks
     selection = st.dataframe(
         df_incidents,
         use_container_width=True,
@@ -99,7 +101,7 @@ with col_table:
         selection_mode="single-row",
         height=550, 
         selection_default={"selection": {"rows": default_selection_idx}},
-        key=f"df_sync_{st.session_state.selected_inc_id}", # Component tracking variant
+        key=f"grid_sync_{st.session_state.selected_inc_id}", # Unified state re-render flag
         column_config={
             "IncidentID": st.column_config.TextColumn("Case ID", width=80),
             "Category": st.column_config.TextColumn("Type", width=110),
@@ -116,11 +118,21 @@ with col_table:
             st.rerun()
 
 with col_map:
-    # 🎯 FIX ISSUE 1: Emojis removed from header layout
     st.markdown("<div class='unified-header'><h3>Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins to expose corridor routes and full log summaries.</p></div>", unsafe_allow_html=True)
     
-    m = folium.Map(location=[22.28552, 114.15769], zoom_start=12, tiles="cartodbpositron")
+    # 🎯 FIX POP-UP: Determine coordinates BEFORE generating the folium Map canvas
+    map_center = [22.28552, 114.15769]
+    zoom_level = 11
     
+    if st.session_state.selected_inc_id:
+        active_rows = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id]
+        if not active_rows.empty:
+            map_center = [active_rows.iloc[0]['lat'], active_rows.iloc[0]['lng']]
+            zoom_level = 15
+            
+    m = folium.Map(location=map_center, zoom_start=zoom_level, tiles="cartodbpositron")
+    
+    # Draw all elements onto map container
     for _, row in df_incidents.iterrows():
         is_current = (row['IncidentID'] == st.session_state.selected_inc_id)
         style = CATEGORY_STYLES.get(row['Category'], CATEGORY_STYLES["General Alert"])
@@ -134,7 +146,6 @@ with col_map:
             tooltip=f"ID: {row['IncidentID']} - {row['Location']}"
         )
         
-        # 🎯 FIX ISSUE 3: Clean pop-up anchoring by avoiding layout animation tearing
         if is_current:
             popup_html = f"""
             <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 5px;'>
@@ -155,28 +166,21 @@ with col_map:
                 geom = row['geometry']
                 if geom is None or geom.geom_type == 'Point': continue
                 folium.GeoJson(geom, style_function=lambda x: {'color': '#E63946', 'weight': 7, 'opacity': 0.9}).add_to(m)
-            
-            # Center directly on selected coordinates to ensure the pop-up aligns perfectly
-            current_row = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].iloc[0]
-            m.location = [current_row['lat'], current_row['lng']]
-            m.zoom_start = 15
-    else:
-        if 'lat' in df_incidents.columns and not df_incidents.empty:
-            m.fit_bounds([[df_incidents['lat'].min(), df_incidents['lng'].min()], 
-                          [df_incidents['lat'].max(), df_incidents['lng'].max()]])
 
     map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked"])
     
-    if map_data and map_data.get("last_object_clicked"):
+    # 🎯 FIX SYNC: Calculate absolute nearest neighbor to bypass float rounding bugs
+    if map_data and map_data.get("last_object_clicked") and not df_incidents.empty:
         click_lat = map_data["last_object_clicked"]["lat"]
         click_lng = map_data["last_object_clicked"]["lng"]
         
-        coordinate_match = df_incidents[
-            (abs(df_incidents['lat'] - click_lat) < 0.0002) & 
-            (abs(df_incidents['lng'] - click_lng) < 0.0002)
-        ]
-        if not coordinate_match.empty:
-            new_map_selection = coordinate_match.iloc[0]['IncidentID']
+        # Vectorized distance formula (hypotenuse delta coordinates)
+        spatial_distances = ((df_incidents['lat'] - click_lat)**2 + (df_incidents['lng'] - click_lng)**2)
+        true_closest_idx = spatial_distances.idxmin()
+        
+        # Verify click lands close to a pin (within roughly 400 meters)
+        if spatial_distances[true_closest_idx] < 0.00015:
+            new_map_selection = df_incidents.loc[true_closest_idx, 'IncidentID']
             if st.session_state.selected_inc_id != new_map_selection:
                 st.session_state.selected_inc_id = new_map_selection
                 st.rerun()
