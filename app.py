@@ -88,7 +88,7 @@ col_table, col_map = st.columns([4, 5])
 
 # 🎯 FIX ISSUE 2: Standardized headers to force side-by-side components parallel
 with col_table:
-    st.markdown("<div class='unified-header'><h3>📋 Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Select a row here or use map markers directly.</p></div>", unsafe_with_html=True)
+    st.markdown("<div class='unified-header'><h3>📋 Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Select a row here or use map markers directly.</p></div>", unsafe_allow_html=True)
     
     # 🎯 FIX ISSUE 1: Explicit column widths force scrollbar activation 
     selection = st.dataframe(
@@ -116,7 +116,7 @@ with col_table:
             st.rerun()
 
 with col_map:
-    st.markdown("<div class='unified-header'><h3>🗺️ Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins to expose corridor routes and full log summaries.</p></div>", unsafe_with_html=True)
+    st.markdown("<div class='unified-header'><h3>🗺️ Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins to expose corridor routes and full log summaries.</p></div>", unsafe_allow_html=True)
     
     m = folium.Map(location=[22.28552, 114.15769], zoom_start=12, tiles="cartodbpositron")
     
