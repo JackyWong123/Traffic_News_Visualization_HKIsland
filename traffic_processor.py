@@ -70,8 +70,8 @@ class TrafficIncidentEngine:
         else:
             return "General Alert"
 
-    def calculate_segment_heading(self, geom):
-        """Calculates the dominant directional vector of a digitized line segment."""
+    def calculate_traffic_flow_heading(self, geom):
+        """Calculates true traffic heading from the first coordinate to the last coordinate (Strictly Code 3)."""
         if geom is None:
             return None
         if geom.geom_type == 'LineString':
@@ -82,10 +82,11 @@ class TrafficIncidentEngine:
             return None
             
         if len(coords) >= 2:
-            dx = coords[-1][0] - coords[0][0] # Change in Easting
-            dy = coords[-1][1] - coords[0][1] # Change in Northing
+            # Target your logic: Calculate vector direction between first pair [0] and last pair [-1]
+            dx = coords[-1][0] - coords[0][0]
+            dy = coords[-1][1] - coords[0][1]
             
-            # Identify which axis represents the dominant movement direction
+            # Match the dominant heading direction axis
             if abs(dx) > abs(dy):
                 return "EAST" if dx > 0 else "WEST"
             else:
@@ -100,7 +101,7 @@ class TrafficIncidentEngine:
         return ""
 
     def process_active_incidents(self):
-        """Parses XML logs using strict coordinate sequence trajectory logic."""
+        """Parses XML logs and handles explicit 1 vs 3 directional criteria."""
         if self.road_df is None:
             self.initialize_spatial_basemaps()
 
@@ -132,15 +133,15 @@ class TrafficIncidentEngine:
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
 
-            # 🎯 STEP 1: Translate news text bounds into geographic target vectors
+            # Translate news destinations into target tracking compass bounds
             bound_target = None
-            if any(kw in active_text_block or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND"]):
+            if any(kw in content_upper or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND"]):
                 bound_target = "WEST"
-            elif any(kw in active_text_block or kw in location_en for kw in ["WAN CHAI BOUND", "CHAI WAN BOUND", "EAST BOUND", "CAUSEWAY BAY BOUND"]):
+            elif any(kw in content_upper or kw in location_en for kw in ["WAN CHAI BOUND", "CHAI WAN BOUND", "EAST BOUND", "CAUSEWAY BAY BOUND"]):
                 bound_target = "EAST"
-            elif any(kw in active_text_block or kw in location_en for kw in ["ABERDEEN BOUND", "SOUTH BOUND", "WONG CHUK HANG BOUND"]):
+            elif any(kw in content_upper or kw in location_en for kw in ["ABERDEEN BOUND", "SOUTH BOUND", "WONG CHUK HANG BOUND"]):
                 bound_target = "SOUTH"
-            elif any(kw in active_text_block or kw in location_en for kw in ["MONG KOK BOUND", "KOWLOON BOUND", "NORTH BOUND"]):
+            elif any(kw in content_upper or kw in location_en for kw in ["MONG KOK BOUND", "KOWLOON BOUND", "NORTH BOUND"]):
                 bound_target = "NORTH"
 
             main_road = None
@@ -166,24 +167,26 @@ class TrafficIncidentEngine:
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
                         matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         
-                        dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE']), None)
+                        dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']), None)
                         valid_indices = []
                         for idx, road_feat in matched_roads.iterrows():
                             geom = road_feat['GEOMETRY']
                             if geom is None: continue
                             
-                            # Keep combined two-way segments immediately
-                            if dir_col and str(road_feat[dir_col]).strip() == '1':
+                            dir_val = "1"
+                            if dir_col and pd.notna(road_feat[dir_col]):
+                                dir_val = str(road_feat[dir_col]).strip().split('.')[0]
+                                
+                            # Value 1 = Two-Way. Keep it immediately.
+                            if not bound_target or dir_val == '1':
                                 valid_indices.append(idx)
                                 continue
-                            
-                            # For one-way segments, check the digitized coordinate direction
-                            if bound_target:
-                                seg_heading = self.calculate_segment_heading(geom)
+                                
+                            # Value 3 = One-Way. Run your coordinate check.
+                            if dir_val == '3':
+                                seg_heading = self.calculate_traffic_flow_heading(geom)
                                 if seg_heading == bound_target:
                                     valid_indices.append(idx)
-                            else:
-                                valid_indices.append(idx)
                                     
                         if valid_indices:
                             matched_roads = matched_roads.loc[valid_indices]
@@ -203,28 +206,33 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE']), None)
+            dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']), None)
 
-            # 🎯 STEP 2: Coordinate Trajectory Validation Filter Loop
+            # ST_TRACKER CARRIAGEWAY VALIDATION FILTER LOOP
             valid_indices = []
             for idx, road_feat in matched_roads.iterrows():
                 geom = road_feat['GEOMETRY']
                 if geom is None: continue
                 
-                # Rule A: If there is no direction context in the news, select everything
                 if not bound_target:
                     valid_indices.append(idx)
                     continue
                 
-                # Rule B: If Travel Direction field equals '1', it is an undivided two-way line. Keep it.
-                if dir_col and str(road_feat[dir_col]).strip() == '1':
+                # Float-safe casting cleanup (handles 1.0 or 3.0 flawlessly)
+                dir_val = "1"
+                if dir_col and pd.notna(road_feat[dir_col]):
+                    dir_val = str(road_feat[dir_col]).strip().split('.')[0]
+                
+                # Rule 1: Code 1 means permitted in both directions. Keep it.
+                if dir_val == '1':
                     valid_indices.append(idx)
                     continue
                     
-                # Rule C: If Travel Direction is '3' (One-Way), evaluate the digitized coordinate sequence direction
-                seg_heading = self.calculate_segment_heading(geom)
-                if seg_heading == bound_target:
-                    valid_indices.append(idx)
+                # Rule 2: Code 3 means permitted in digitized coordinates sequence direction only.
+                if dir_val == '3':
+                    seg_heading = self.calculate_traffic_flow_heading(geom)
+                    if seg_heading == bound_target:
+                        valid_indices.append(idx)
                         
             if valid_indices:
                 matched_roads = matched_roads.loc[valid_indices]
