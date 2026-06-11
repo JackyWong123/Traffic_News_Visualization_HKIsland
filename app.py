@@ -53,7 +53,7 @@ CATEGORY_STYLES = {
     "General Alert": {"color": "blue", "icon": "exclamation-circle", "prefix": "fa"}
 }
 
-# 🎯 FIX ISSUE 3: Snap representation coordinates precisely onto the road lines
+# Snap representation coordinates precisely onto the road lines
 if not df_incidents.empty and 'lat' not in df_incidents.columns:
     gdf_4326 = gdf_spatial.to_crs(epsg=4326)
     rep_points = []
@@ -65,7 +65,6 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
             if not point_feats.empty:
                 rep_pt = point_feats.iloc[0]['geometry']
             else:
-                # Interpolate finds the exact middle length along the line string path
                 combined_line = inc_geom.unary_union
                 if combined_line.geom_type in ['LineString', 'MultiLineString']:
                     rep_pt = combined_line.interpolate(0.5, normalized=True)
@@ -77,7 +76,7 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
         df_rep = pd.DataFrame(rep_points)
         df_incidents = df_incidents.merge(df_rep, on='IncidentID', how='inner')
 
-# 🎯 FIX ISSUE 4: Sync state index from Map interactions back to Table highlighting
+# Sync state index from Map interactions back to Table highlighting
 default_selection_idx = []
 if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
     matched_row_idx = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].index[0]
@@ -86,11 +85,11 @@ if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
 # Grid Columns Layout Setup
 col_table, col_map = st.columns([4, 5])
 
-# 🎯 FIX ISSUE 2: Standardized headers to force side-by-side components parallel
 with col_table:
-    st.markdown("<div class='unified-header'><h3>📋 Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Select a row here or use map markers directly.</p></div>", unsafe_allow_html=True)
+    # 🎯 FIX ISSUE 1: Emojis removed from header layout
+    st.markdown("<div class='unified-header'><h3>Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Click anywhere on a row to isolate the incident footprint.</p></div>", unsafe_allow_html=True)
     
-    # 🎯 FIX ISSUE 1: Explicit column widths force scrollbar activation 
+    # 🎯 FIX ISSUE 4 & 5: Dynamic Key forces table to update its highlight immediately on map clicks
     selection = st.dataframe(
         df_incidents,
         use_container_width=True,
@@ -100,11 +99,12 @@ with col_table:
         selection_mode="single-row",
         height=550, 
         selection_default={"selection": {"rows": default_selection_idx}},
+        key=f"df_sync_{st.session_state.selected_inc_id}", # Component tracking variant
         column_config={
             "IncidentID": st.column_config.TextColumn("Case ID", width=80),
             "Category": st.column_config.TextColumn("Type", width=110),
-            "Location": st.column_config.TextColumn("Corridor Context", width=200), 
-            "Details": st.column_config.TextColumn("Full Descriptive Summary Log View", width=600) # Expands past box boundary to generate scroll bars
+            "Location": st.column_config.TextColumn("Corridor Context", width=180), 
+            "Details": st.column_config.TextColumn("Summary Log View (Click row to read full text below)", width=600) 
         }
     )
     
@@ -116,7 +116,8 @@ with col_table:
             st.rerun()
 
 with col_map:
-    st.markdown("<div class='unified-header'><h3>🗺️ Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins to expose corridor routes and full log summaries.</p></div>", unsafe_allow_html=True)
+    # 🎯 FIX ISSUE 1: Emojis removed from header layout
+    st.markdown("<div class='unified-header'><h3>Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins to expose corridor routes and full log summaries.</p></div>", unsafe_allow_html=True)
     
     m = folium.Map(location=[22.28552, 114.15769], zoom_start=12, tiles="cartodbpositron")
     
@@ -133,13 +134,13 @@ with col_map:
             tooltip=f"ID: {row['IncidentID']} - {row['Location']}"
         )
         
-        # 🎯 FIX ISSUE 5: Append an auto-opening info box directly above the selected pin
+        # 🎯 FIX ISSUE 3: Clean pop-up anchoring by avoiding layout animation tearing
         if is_current:
             popup_html = f"""
-            <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px;'>
-                <b>📍 {row['Location']}</b><br>
-                <span style='color: #E63946;'>• {row['Category']}</span><br>
-                <p style='margin-top:5px; color:#555;'>Click lower panel link to read full report.</p>
+            <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 5px;'>
+                <b style='color: #333;'>📍 {row['Location']}</b><br>
+                <span style='color: #E63946; font-weight: bold;'>• {row['Category']}</span><br>
+                <p style='margin: 5px 0 0 0; color: #666; font-size: 11px;'>Full description loaded below log table.</p>
             </div>
             """
             folium.Popup(popup_html, show=True, max_width=250).add_to(marker)
@@ -155,8 +156,10 @@ with col_map:
                 if geom is None or geom.geom_type == 'Point': continue
                 folium.GeoJson(geom, style_function=lambda x: {'color': '#E63946', 'weight': 7, 'opacity': 0.9}).add_to(m)
             
-            total_bounds = matched_shapes_4326.total_bounds
-            m.fit_bounds([[total_bounds[1], total_bounds[0]], [total_bounds[3], total_bounds[2]]])
+            # Center directly on selected coordinates to ensure the pop-up aligns perfectly
+            current_row = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].iloc[0]
+            m.location = [current_row['lat'], current_row['lng']]
+            m.zoom_start = 15
     else:
         if 'lat' in df_incidents.columns and not df_incidents.empty:
             m.fit_bounds([[df_incidents['lat'].min(), df_incidents['lng'].min()], 
@@ -169,8 +172,8 @@ with col_map:
         click_lng = map_data["last_object_clicked"]["lng"]
         
         coordinate_match = df_incidents[
-            (abs(df_incidents['lat'] - click_lat) < 0.0001) & 
-            (abs(df_incidents['lng'] - click_lng) < 0.0001)
+            (abs(df_incidents['lat'] - click_lat) < 0.0002) & 
+            (abs(df_incidents['lng'] - click_lng) < 0.0002)
         ]
         if not coordinate_match.empty:
             new_map_selection = coordinate_match.iloc[0]['IncidentID']
