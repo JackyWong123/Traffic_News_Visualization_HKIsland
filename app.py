@@ -8,7 +8,7 @@ from traffic_processor import TrafficIncidentEngine
 
 st.set_page_config(layout="wide", page_title="HKI Traffic Dashboard")
 
-# Custom CSS styling to align headers and style our scrollable interactive cards
+# Custom CSS styling to lock headers parallel and standardize grid spacing
 st.markdown("""
     <style>
         div[data-testid="stColumn"] {
@@ -17,8 +17,8 @@ st.markdown("""
             justify-content: flex-start;
         }
         .unified-header {
-            margin-bottom: 24px;
-            height: 70px;
+            margin-bottom: 12px;
+            height: 60px;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -41,18 +41,14 @@ def run_spatial_processing_pipeline():
 raw_incidents, gdf_spatial = run_spatial_processing_pipeline()
 
 # ==========================================
-# SELECTION MEMORY & VIEWPORT ANCHORS
+# BI-DIRECTIONAL SELECTION & MEMORY LOCK
 # ==========================================
 if "selected_inc_id" not in st.session_state:
     st.session_state.selected_inc_id = None
-if "map_center" not in st.session_state:
-    st.session_state.map_center = [22.28552, 114.15769]
-if "map_zoom" not in st.session_state:
-    st.session_state.map_zoom = 12
 
 df_incidents = raw_incidents.copy()
 
-# Lock coordinates onto rows
+# Lock pinning coordinates directly onto row attributes
 if not df_incidents.empty and 'lat' not in df_incidents.columns:
     gdf_4326 = gdf_spatial.to_crs(epsg=4326)
     rep_points = []
@@ -75,6 +71,12 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
         df_rep = pd.DataFrame(rep_points)
         df_incidents = df_incidents.merge(df_rep, on='IncidentID', how='inner')
 
+# Resolve active index mapping to ensure selection persists across frames
+default_selection_idx = []
+if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
+    matched_row_idx = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].index[0]
+    default_selection_idx = [int(matched_row_idx)]
+
 CATEGORY_STYLES = {
     "Accident": {"color": "red", "icon": "car", "prefix": "fa"},
     "Road Works": {"color": "orange", "icon": "wrench", "prefix": "fa"},
@@ -89,69 +91,72 @@ CATEGORY_STYLES = {
 col_table, col_map = st.columns([4, 5])
 
 with col_table:
-    # Fix 1: Text-only header without emojis
-    st.markdown("<div class='unified-header'><h3>Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Click 'Focus on Map' inside any log card to isolate its corridor footprint.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='unified-header'><h3>Traffic News Log</h3><p style='color:gray; font-size:13px; margin:0;'>Click anywhere on a cell row to project its corridor lines onto the map canvas.</p></div>", unsafe_allow_html=True)
     
-    # Fix 2 & 4: Custom Scrollable Feed Container with Text Wrapping and Row Selection
-    with st.container(height=550):
-        for _, row in df_incidents.iterrows():
-            is_current = (row['IncidentID'] == st.session_state.selected_inc_id)
-            
-            # Change outline border and background color dynamically based on active state
-            card_border = "border: 2px solid #E63946; background-color: #FFF5F5;" if is_current else "border: 1px solid #E0E0E0; background-color: #FAFAFA;"
-            badge_color = CATEGORY_STYLES.get(row['Category'], {"color": "gray"})["color"]
-            if badge_color == "amber": badge_color = "#FFB000"
-            
-            # Clean HTML template to force text wrapping
-            card_template = f"""
-            <div style="{card_border} padding: 14px; border-radius: 8px; margin-bottom: 12px; font-family: -apple-system, BlinkMacSystemFont, sans-serif;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-weight: bold; font-size: 14px; color: #111;">Case ID: {row['IncidentID']}</span>
-                    <span style="background-color: {badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase;">{row['Category']}</span>
-                </div>
-                <div style="font-weight: bold; color: #444; font-size: 13px; margin-bottom: 6px;">📍 {row['Location']}</div>
-                <div style="font-size: 13px; color: #555; line-height: 1.4; word-wrap: break-word; white-space: normal;">{row['Details']}</div>
-            </div>
-            """
-            st.markdown(card_template, unsafe_allow_html=True)
-            
-            # Simple interaction button right under the text card
-            if st.button("Focus on Map", key=f"select_btn_{row['IncidentID']}", use_container_width=True, type="primary" if is_current else "secondary"):
-                st.session_state.selected_inc_id = row['IncidentID']
-                st.session_state.map_center = [row['lat'], row['lng']]
-                st.session_state.map_zoom = 16
-                st.rerun()
+    # Standard data table featuring search, sort, and fixed aligned container heights
+    selection = st.dataframe(
+        df_incidents,
+        use_container_width=True,
+        hide_index=True,
+        column_order=["IncidentID", "Category", "Location", "Details"],
+        on_select="rerun",
+        selection_mode="single-row",
+        height=550, 
+        selection_default={"selection": {"rows": default_selection_idx}},
+        key="stable_traffic_grid_view", # Static reference allows stable row highlighting
+        column_config={
+            "IncidentID": st.column_config.TextColumn("Case ID", width=70),
+            "Category": st.column_config.TextColumn("Type", width=100),
+            "Location": st.column_config.TextColumn("Corridor Context", width=180), 
+            "Details": st.column_config.TextColumn("Summary Log View", width=1000) # Maximum width stretches out long text rows
+        }
+    )
+    
+    # Sync structural table selection adjustments to session state memory
+    if selection and selection['selection']['rows']:
+        row_idx = selection['selection']['rows'][0]
+        table_selected_id = df_incidents.iloc[row_idx]['IncidentID']
+        if st.session_state.selected_inc_id != table_selected_id:
+            st.session_state.selected_inc_id = table_selected_id
+            st.rerun()
 
 with col_map:
-    # Fix 1: Text-only header without emojis
-    st.markdown("<div class='unified-header'><h3>Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins directly to cross-examine and sync the traffic logs.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='unified-header'><h3>Map Visualization</h3><p style='color:gray; font-size:13px; margin:0;'>Click markers directly to synchronize the active table log row context.</p></div>", unsafe_allow_html=True)
     
-    # Generate map object using our stabilized layout coordinates
-    m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom, tiles="cartodbpositron")
+    # Establish stationary coordinate frames BEFORE drawing canvas to prevent popups floating away
+    map_center = [22.28552, 114.15769]
+    zoom_level = 11
     
-    # Render map markers
+    if st.session_state.selected_inc_id:
+        active_rows = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id]
+        if not active_rows.empty:
+            map_center = [active_rows.iloc[0]['lat'], active_rows.iloc[0]['lng']]
+            zoom_level = 15
+            
+    m = folium.Map(location=map_center, zoom_start=zoom_level, tiles="cartodbpositron")
+    
     for _, row in df_incidents.iterrows():
         is_current = (row['IncidentID'] == st.session_state.selected_inc_id)
         style = CATEGORY_STYLES.get(row['Category'], CATEGORY_STYLES["General Alert"])
         
         bg_color = "darkpurple" if is_current else style["color"]
+        icon_color = "white"
         
         popup_html = f"""
-        <div style='font-family: Arial, sans-serif; font-size: 13px; width: 210px; padding: 3px;'>
+        <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 3px;'>
             <b style='color: #222;'>📍 {row['Location']}</b><br>
             <span style='color: #E63946; font-weight: bold;'>• {row['Category']}</span><br>
-            <p style='margin: 5px 0 0 0; color: #555; font-size: 11px; line-height:1.3;'>Full text loaded underneath log column feed.</p>
+            <p style='margin: 5px 0 0 0; color: #555; font-size: 11px;'>Full descriptive logs loaded below.</p>
         </div>
         """
         
         folium.Marker(
             location=[row['lat'], row['lng']],
-            icon=folium.Icon(color=bg_color, icon_color="white", icon=style["icon"], prefix=style["prefix"]),
+            icon=folium.Icon(color=bg_color, icon_color=icon_color, icon=style["icon"], prefix=style["prefix"]),
             tooltip=f"ID: {row['IncidentID']} - {row['Location']}",
             popup=folium.Popup(popup_html, max_width=250)
         ).add_to(m)
         
-    # Project linear vector links for the selected incident
     if st.session_state.selected_inc_id:
         matched_shapes = gdf_spatial[gdf_spatial['IncidentID'] == st.session_state.selected_inc_id]
         if not matched_shapes.empty:
@@ -161,26 +166,13 @@ with col_map:
                 if geom is None or geom.geom_type == 'Point': continue
                 folium.GeoJson(geom, style_function=lambda x: {'color': '#E63946', 'weight': 7, 'opacity': 0.9}).add_to(m)
 
-    # Render widget and track viewport parameters
-    map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked", "center", "zoom"])
+    map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked"])
     
-    # Fix 3 & 5: Save active zoom positions dynamically to prevent rendering layout tears
-    if map_data:
-        if map_data.get("center") and map_data.get("zoom"):
-            current_lat = map_data["center"]["lat"]
-            current_lng = map_data["center"]["lng"]
-            current_zoom = map_data["zoom"]
-            
-            # Update state anchors silently behind the scenes
-            st.session_state.map_center = [current_lat, current_lng]
-            st.session_state.map_zoom = current_zoom
-
-    # Handle map pin click events
+    # Nearest-Neighbor matching solves click synchronization flawlessly
     if map_data and map_data.get("last_object_clicked") and not df_incidents.empty:
         click_lat = map_data["last_object_clicked"]["lat"]
         click_lng = map_data["last_object_clicked"]["lng"]
         
-        # Determine closest geographic coordinate match
         spatial_distances = ((df_incidents['lat'] - click_lat)**2 + (df_incidents['lng'] - click_lng)**2)
         true_closest_idx = spatial_distances.idxmin()
         
@@ -188,8 +180,6 @@ with col_map:
             new_map_selection = df_incidents.loc[true_closest_idx, 'IncidentID']
             if st.session_state.selected_inc_id != new_map_selection:
                 st.session_state.selected_inc_id = new_map_selection
-                # Freeze viewport exactly where the map is right now to anchor the popup perfectly
-                st.session_state.map_center = [click_lat, click_lng]
                 st.rerun()
 
 # ==========================================
