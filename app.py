@@ -42,12 +42,12 @@ raw_incidents, gdf_spatial = run_spatial_processing_pipeline()
 # ==========================================
 # STATIC DATA PREPARATION (LOCKS ROW INDICES)
 # ==========================================
-# We process coordinates immediately to ensure row index integers never shift
 if "selected_inc_id" not in st.session_state:
     st.session_state.selected_inc_id = None
 
 df_incidents = raw_incidents.copy()
 
+# Lock pinning coordinates directly onto row attributes
 if not df_incidents.empty and 'lat' not in df_incidents.columns:
     gdf_4326 = gdf_spatial.to_crs(epsg=4326)
     rep_points = []
@@ -70,7 +70,7 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
         df_rep = pd.DataFrame(rep_points)
         df_incidents = df_incidents.merge(df_rep, on='IncidentID', how='inner')
 
-# Stable index resolution for cross-component highlighting
+# Resolve active index mapping to ensure selection persists across frames
 default_selection_idx = []
 if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
     matched_row_idx = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].index[0]
@@ -84,14 +84,13 @@ CATEGORY_STYLES = {
     "General Alert": {"color": "blue", "icon": "exclamation-circle", "prefix": "fa"}
 }
 
-# ==========================================
-# INTERACTIVE SCREEN LAYOUT GENERATION
-# ==========================================
+# Grid Columns Layout Setup
 col_table, col_map = st.columns([4, 5])
 
 with col_table:
     st.markdown("<div class='unified-header'><h3>Traffic News Log</h3><p style='color:gray; font-size:14px; margin:0;'>Click anywhere on a row to isolate the incident footprint.</p></div>", unsafe_allow_html=True)
     
+    # Locked down table tracking engine
     selection = st.dataframe(
         df_incidents,
         use_container_width=True,
@@ -101,7 +100,7 @@ with col_table:
         selection_mode="single-row",
         height=550, 
         selection_default={"selection": {"rows": default_selection_idx}},
-        key=f"grid_sync_{st.session_state.selected_inc_id}", # Unified state re-render flag
+        key="stable_traffic_grid_view", # Fixed static identity prevents highlight dropping
         column_config={
             "IncidentID": st.column_config.TextColumn("Case ID", width=80),
             "Category": st.column_config.TextColumn("Type", width=110),
@@ -120,7 +119,7 @@ with col_table:
 with col_map:
     st.markdown("<div class='unified-header'><h3>Map Visualization</h3><p style='color:gray; font-size:14px; margin:0;'>Click pins to expose corridor routes and full log summaries.</p></div>", unsafe_allow_html=True)
     
-    # 🎯 FIX POP-UP: Determine coordinates BEFORE generating the folium Map canvas
+    # Establish persistent map coordinate tracking anchors
     map_center = [22.28552, 114.15769]
     zoom_level = 11
     
@@ -132,7 +131,7 @@ with col_map:
             
     m = folium.Map(location=map_center, zoom_start=zoom_level, tiles="cartodbpositron")
     
-    # Draw all elements onto map container
+    # Render all active pins
     for _, row in df_incidents.iterrows():
         is_current = (row['IncidentID'] == st.session_state.selected_inc_id)
         style = CATEGORY_STYLES.get(row['Category'], CATEGORY_STYLES["General Alert"])
@@ -140,24 +139,22 @@ with col_map:
         bg_color = "darkpurple" if is_current else style["color"]
         icon_color = "white"
         
-        marker = folium.Marker(
+        popup_html = f"""
+        <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 5px;'>
+            <b style='color: #333;'>📍 {row['Location']}</b><br>
+            <span style='color: #E63946; font-weight: bold;'>• {row['Category']}</span><br>
+            <p style='margin: 5px 0 0 0; color: #666; font-size: 11px;'>Full report loaded underneath log table.</p>
+        </div>
+        """
+        
+        folium.Marker(
             location=[row['lat'], row['lng']],
             icon=folium.Icon(color=bg_color, icon_color=icon_color, icon=style["icon"], prefix=style["prefix"]),
-            tooltip=f"ID: {row['IncidentID']} - {row['Location']}"
-        )
+            tooltip=f"ID: {row['IncidentID']} - {row['Location']}",
+            popup=folium.Popup(popup_html, max_width=250)
+        ).add_to(m)
         
-        if is_current:
-            popup_html = f"""
-            <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 5px;'>
-                <b style='color: #333;'>📍 {row['Location']}</b><br>
-                <span style='color: #E63946; font-weight: bold;'>• {row['Category']}</span><br>
-                <p style='margin: 5px 0 0 0; color: #666; font-size: 11px;'>Full description loaded below log table.</p>
-            </div>
-            """
-            folium.Popup(popup_html, show=True, max_width=250).add_to(marker)
-            
-        marker.add_to(m)
-        
+    # Project high-visibility overlay lines for selected cases
     if st.session_state.selected_inc_id:
         matched_shapes = gdf_spatial[gdf_spatial['IncidentID'] == st.session_state.selected_inc_id]
         if not matched_shapes.empty:
@@ -169,17 +166,16 @@ with col_map:
 
     map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked"])
     
-    # 🎯 FIX SYNC: Calculate absolute nearest neighbor to bypass float rounding bugs
+    # Nearest-Neighbor matching engine overrides float rounding problems completely
     if map_data and map_data.get("last_object_clicked") and not df_incidents.empty:
         click_lat = map_data["last_object_clicked"]["lat"]
         click_lng = map_data["last_object_clicked"]["lng"]
         
-        # Vectorized distance formula (hypotenuse delta coordinates)
         spatial_distances = ((df_incidents['lat'] - click_lat)**2 + (df_incidents['lng'] - click_lng)**2)
         true_closest_idx = spatial_distances.idxmin()
         
-        # Verify click lands close to a pin (within roughly 400 meters)
-        if spatial_distances[true_closest_idx] < 0.00015:
+        # Safe interaction padding radius validation
+        if spatial_distances[true_closest_idx] < 0.0005:
             new_map_selection = df_incidents.loc[true_closest_idx, 'IncidentID']
             if st.session_state.selected_inc_id != new_map_selection:
                 st.session_state.selected_inc_id = new_map_selection
