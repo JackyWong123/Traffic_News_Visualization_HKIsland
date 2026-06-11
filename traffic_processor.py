@@ -70,6 +70,28 @@ class TrafficIncidentEngine:
         else:
             return "General Alert"
 
+    def calculate_segment_heading(self, geom):
+        """Calculates the dominant directional vector of a digitized line segment."""
+        if geom is None:
+            return None
+        if geom.geom_type == 'LineString':
+            coords = list(geom.coords)
+        elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
+            coords = list(max(geom.geoms, key=lambda l: l.length).coords)
+        else:
+            return None
+            
+        if len(coords) >= 2:
+            dx = coords[-1][0] - coords[0][0] # Change in Easting
+            dy = coords[-1][1] - coords[0][1] # Change in Northing
+            
+            # Identify which axis represents the dominant movement direction
+            if abs(dx) > abs(dy):
+                return "EAST" if dx > 0 else "WEST"
+            else:
+                return "NORTH" if dy > 0 else "SOUTH"
+        return None
+
     @staticmethod
     def _get_xml_text(message_element, tag_name):
         for child in message_element:
@@ -78,7 +100,7 @@ class TrafficIncidentEngine:
         return ""
 
     def process_active_incidents(self):
-        """Parses XML logs using strict official IRN direction schema rules."""
+        """Parses XML logs using strict coordinate sequence trajectory logic."""
         if self.road_df is None:
             self.initialize_spatial_basemaps()
 
@@ -110,7 +132,7 @@ class TrafficIncidentEngine:
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
 
-            # Extract traffic direction bound context out of the news content text
+            # 🎯 STEP 1: Translate news text bounds into geographic target vectors
             bound_target = None
             if any(kw in active_text_block or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND"]):
                 bound_target = "WEST"
@@ -150,17 +172,18 @@ class TrafficIncidentEngine:
                             geom = road_feat['GEOMETRY']
                             if geom is None: continue
                             
-                            # 🎯 SPEC FIX: Value '1' means permitted in both directions. Keep it immediately.
-                            if not bound_target or (dir_col and str(road_feat[dir_col]).strip() == '1'):
+                            # Keep combined two-way segments immediately
+                            if dir_col and str(road_feat[dir_col]).strip() == '1':
                                 valid_indices.append(idx)
                                 continue
                             
-                            # Value '3' means restricted to digitized path direction. Run heading vector calculations:
-                            coords = list(geom.coords) if geom.geom_type == 'LineString' else (list(max(geom.geoms, key=lambda l: l.length).coords) if geom.geom_type == 'MultiLineString' and not geom.is_empty else [])
-                            if len(coords) >= 2:
-                                dx, dy = coords[-1][0] - coords[0][0], coords[-1][1] - coords[0][1]
-                                if (bound_target == "WEST" and dx < -5) or (bound_target == "EAST" and dx > 5) or (bound_target == "SOUTH" and dy < -5) or (bound_target == "NORTH" and dy > 5):
+                            # For one-way segments, check the digitized coordinate direction
+                            if bound_target:
+                                seg_heading = self.calculate_segment_heading(geom)
+                                if seg_heading == bound_target:
                                     valid_indices.append(idx)
+                            else:
+                                valid_indices.append(idx)
                                     
                         if valid_indices:
                             matched_roads = matched_roads.loc[valid_indices]
@@ -180,54 +203,28 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            # Identify target column name variant
-            dir_col = None
-            for col in matched_roads.columns:
-                if col in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']:
-                    dir_col = col
-                    break
+            dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE']), None)
 
-            # Directional Filter Execution Loop
+            # 🎯 STEP 2: Coordinate Trajectory Validation Filter Loop
             valid_indices = []
             for idx, road_feat in matched_roads.iterrows():
                 geom = road_feat['GEOMETRY']
                 if geom is None: continue
+                
+                # Rule A: If there is no direction context in the news, select everything
                 if not bound_target:
                     valid_indices.append(idx)
                     continue
-                    
-                is_combined_two_way = False
+                
+                # Rule B: If Travel Direction field equals '1', it is an undivided two-way line. Keep it.
                 if dir_col and str(road_feat[dir_col]).strip() == '1':
-                    is_combined_two_way = True
-                        
-                # 🎯 SPEC FIX: If Travel Direction equals '1', it's a shared two-way asset. Save it.
-                if is_combined_two_way:
                     valid_indices.append(idx)
                     continue
                     
-                # If Travel Direction equals '3', evaluate its digitized direction coordinate delta vector
-                if geom.geom_type == 'LineString':
-                    coords = list(geom.coords)
-                elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
-                    coords = list(max(geom.geoms, key=lambda l: l.length).coords)
-                else: coords = []
-                    
-                if len(coords) >= 2:
-                    dx = coords[-1][0] - coords[0][0] # Easting Vector Delta
-                    dy = coords[-1][1] - coords[0][1] # Northing Vector Delta
-                    
-                    is_match = False
-                    if bound_target == "WEST" and dx < -5:
-                        is_match = True
-                    elif bound_target == "EAST" and dx > 5:
-                        is_match = True
-                    elif bound_target == "SOUTH" and dy < -5:
-                        is_match = True
-                    elif bound_target == "NORTH" and dy > 5:
-                        is_match = True
-                        
-                    if is_match:
-                        valid_indices.append(idx)
+                # Rule C: If Travel Direction is '3' (One-Way), evaluate the digitized coordinate sequence direction
+                seg_heading = self.calculate_segment_heading(geom)
+                if seg_heading == bound_target:
+                    valid_indices.append(idx)
                         
             if valid_indices:
                 matched_roads = matched_roads.loc[valid_indices]
