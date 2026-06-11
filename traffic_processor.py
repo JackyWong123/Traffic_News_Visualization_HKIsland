@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 import re
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import MultiPoint
+from shapely.geometry import Point, MultiPoint
 from shapely.ops import nearest_points
 
 class TrafficIncidentEngine:
@@ -70,9 +70,9 @@ class TrafficIncidentEngine:
         else:
             return "General Alert"
 
-    def is_correct_direction(self, geom, bound_target):
+    def is_correct_direction(self, geom, bound_target, towards_geom=None):
         """Verifies if the coordinate sequence trajectory vector matches the target direction quadrant."""
-        if geom is None or not bound_target:
+        if geom is None:
             return True
             
         if geom.geom_type == 'LineString':
@@ -82,21 +82,29 @@ class TrafficIncidentEngine:
         else:
             return True
             
-        if len(coords) >= 2:
-            # Trajectory calculation from absolute first pair [0] to absolute last pair [-1]
-            dx = coords[-1][0] - coords[0][0] # Delta Easting
-            dy = coords[-1][1] - coords[0][1] # Delta Northing
+        if len(coords) < 2:
+            return True
             
-            # Match coordinate trends against geographic boundaries without strict axis snapping
-            if bound_target == "WEST" and dx < 0:
-                return True
-            if bound_target == "EAST" and dx > 0:
-                return True
-            if bound_target == "SOUTH" and dy < 0:
-                return True
-            if bound_target == "NORTH" and dy > 0:
-                return True
+        # 🎯 TARGET LOGIC: Extract absolute first coordinate and absolute last coordinate pairs
+        start_pt = Point(coords[0])
+        end_pt = Point(coords[-1])
+        
+        # Method A: Destination Proximity Vector evaluation (e.g. 'Towards Aberdeen Main Road')
+        if towards_geom is not None:
+            d_start = start_pt.distance(towards_geom)
+            d_end = end_pt.distance(towards_geom)
+            return d_end < d_start # True if moving closer to the target destination
+
+        # Method B: Global compass vector coordinate trajectory mapping
+        if bound_target:
+            dx = coords[-1][0] - coords[0][0]
+            dy = coords[-1][1] - coords[0][1]
+            if bound_target == "WEST" and dx < -2: return True
+            if bound_target == "EAST" and dx > 2: return True
+            if bound_target == "SOUTH" and dy < -2: return True
+            if bound_target == "NORTH" and dy > 2: return True
             return False
+            
         return True
 
     @staticmethod
@@ -139,7 +147,7 @@ class TrafficIncidentEngine:
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
 
-            # Map descriptive direction targets to vector bounds
+            # Compass Target Mapping
             bound_target = None
             if any(kw in content_upper or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "TO CENTRAL"]):
                 bound_target = "WEST"
@@ -149,6 +157,23 @@ class TrafficIncidentEngine:
                 bound_target = "SOUTH"
             elif any(kw in content_upper or kw in location_en for kw in ["MONG KOK BOUND", "KOWLOON BOUND", "NORTH BOUND"]):
                 bound_target = "NORTH"
+
+            # 🎯 NEW: Dynamic Destination Entity Extractor ('Towards...')
+            towards_geom = None
+            towards_match = re.search(r'(?:TOWARDS|HEADING TO|LEADING TO)\s+([A-Z0-9\s\-]+)', content_upper)
+            if towards_match:
+                target_name = towards_match.group(1).strip()
+                target_name = re.split(r'\b(IS|BOUND|NEAR|BETWEEN|AND|PART)\b', target_name)[0].strip()
+                
+                if target_name in self.road_names_cache:
+                    towards_geom = self.road_df[self.road_df['STREET_ENAME'] == target_name].geometry.unary_union
+                elif target_name in self.landmark_cache:
+                    towards_geom = self.landmark_cache[target_name]
+                else:
+                    for r in sorted(list(self.road_names_cache), key=len, reverse=True):
+                        if r in target_name:
+                            towards_geom = self.road_df[self.road_df['STREET_ENAME'] == r].geometry.unary_union
+                            break
 
             main_road = None
             if location_en in self.road_names_cache:
@@ -173,7 +198,6 @@ class TrafficIncidentEngine:
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
                         matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         
-                        # 🎯 FIX: Substring scan protects against truncated attribute names
                         dir_col = None
                         for col in matched_roads.columns:
                             if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
@@ -189,11 +213,11 @@ class TrafficIncidentEngine:
                             if dir_col and pd.notna(road_feat[dir_col]):
                                 dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                                 
-                            if not bound_target or dir_val == '1':
+                            if (not bound_target and towards_geom is None) or dir_val == '1':
                                 valid_indices.append(idx)
                                 continue
                                 
-                            if dir_val == '3' and self.is_correct_direction(geom, bound_target):
+                            if dir_val == '3' and self.is_correct_direction(geom, bound_target, towards_geom):
                                 valid_indices.append(idx)
                                     
                         matched_roads = matched_roads.loc[valid_indices]
@@ -214,20 +238,19 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            # 🎯 FIX: Substring scanner ensures 'TRAVEL_DIR' matches properly
             dir_col = None
             for col in matched_roads.columns:
                 if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
                     dir_col = col
                     break
 
-            # Carriageway Validation Loop
+            # Carriageway Validation Filter Loop
             valid_indices = []
             for idx, road_feat in matched_roads.iterrows():
                 geom = road_feat['GEOMETRY']
                 if geom is None: continue
                 
-                if not bound_target:
+                if not bound_target and towards_geom is None:
                     valid_indices.append(idx)
                     continue
                 
@@ -235,16 +258,15 @@ class TrafficIncidentEngine:
                 if dir_col and pd.notna(road_feat[dir_col]):
                     dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                 
-                # Code 1: Combined Two-Way. Always retain.
+                # Code 1: Combined Two-Way link asset geometry. Keep it immediately.
                 if dir_val == '1':
                     valid_indices.append(idx)
                     continue
                     
-                # Code 3: One-Way Carriageway. Evaluate coordinate trajectory vector.
-                if dir_val == '3' and self.is_correct_direction(geom, bound_target):
+                # Code 3: One-Way Carriageway Link segment. Verify endpoints trajectory path.
+                if dir_val == '3' and self.is_correct_direction(geom, bound_target, towards_geom):
                     valid_indices.append(idx)
                         
-            # Enforce slicing to drop the incorrect bound
             matched_roads = matched_roads.loc[valid_indices]
             if matched_roads.empty:
                 continue
