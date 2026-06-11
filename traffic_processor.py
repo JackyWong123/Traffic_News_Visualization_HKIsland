@@ -6,23 +6,6 @@ import geopandas as gpd
 from shapely.geometry import Point, MultiPoint
 from shapely.ops import nearest_points
 
-# Hardcoded anchors for major bounds to ensure the math always has a target destination (HK80 EPSG:2326 coordinates)
-MAJOR_DISTRICTS_HK80 = {
-    "CENTRAL": (833500, 816000),
-    "CHAI WAN": (841000, 812500),
-    "EASTERN": (841000, 812500),
-    "ABERDEEN": (834000, 812000),
-    "KENNEDY TOWN": (831000, 816000),
-    "WAN CHAI": (835500, 815500),
-    "CAUSEWAY BAY": (837000, 815500),
-    "NORTH POINT": (839000, 817000),
-    "QUARRY BAY": (840000, 816000),
-    "WONG CHUK HANG": (835000, 812000),
-    "STANLEY": (839500, 808500),
-    "MONG KOK": (835500, 820000), # Cross harbour reference
-    "KOWLOON": (836000, 819000)
-}
-
 class TrafficIncidentEngine:
     def __init__(self, road_path, boundary_path, building_path, xml_path, distance_threshold=500):
         self.road_path = road_path
@@ -86,40 +69,63 @@ class TrafficIncidentEngine:
         else:
             return "General Alert"
 
-    def is_correct_direction_vector(self, geom, target_geom):
-        """
-        Your Step 3 Math: Computes the Dot Product between the segment vector and the destination vector.
-        If > 0, the segment is pointing generally towards the target bound.
-        """
-        if geom is None or target_geom is None:
-            return True # Keep if we can't mathematically determine
+    def filter_directional_bounds(self, matched_roads, bound_compass):
+        """Topological Anti-Vector Engine: Drops split highway lanes traveling the wrong way."""
+        if not bound_compass or matched_roads.empty:
+            return matched_roads
             
-        if geom.geom_type == 'LineString':
-            coords = list(geom.coords)
-        elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
-            coords = list(max(geom.geoms, key=lambda l: l.length).coords)
-        else:
-            return True
+        # Scan for the correct column name safely
+        dir_col = None
+        for col in matched_roads.columns:
+            if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
+                dir_col = col
+                break
+                
+        valid_indices = []
+        for idx, road_feat in matched_roads.iterrows():
+            geom = road_feat['GEOMETRY']
+            if geom is None: continue
             
-        if len(coords) < 2: 
-            return True
+            dir_val = "1"
+            if dir_col and pd.notna(road_feat[dir_col]):
+                dir_val = str(road_feat[dir_col]).strip().split('.')[0]
+                
+            if dir_val == '3':
+                # It is a one-way carriageway. Evaluate its physical trajectory vector.
+                if geom.geom_type == 'LineString':
+                    coords = list(geom.coords)
+                elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
+                    coords = list(max(geom.geoms, key=lambda l: l.length).coords)
+                else:
+                    valid_indices.append(idx)
+                    continue
+                    
+                if len(coords) < 2:
+                    valid_indices.append(idx)
+                    continue
+                    
+                dx = coords[-1][0] - coords[0][0] # Delta Easting
+                dy = coords[-1][1] - coords[0][1] # Delta Northing
+                
+                # ANTI-VECTOR RULE: If it strongly contradicts the destination compass target, drop it!
+                keep_segment = True
+                if bound_compass == "WEST" and dx > 10: keep_segment = False
+                if bound_compass == "EAST" and dx < -10: keep_segment = False
+                if bound_compass == "SOUTH" and dy > 10: keep_segment = False
+                if bound_compass == "NORTH" and dy < -10: keep_segment = False
+                
+                if keep_segment:
+                    valid_indices.append(idx)
+            else:
+                # Value 1 = Two-Way Link. Must be retained.
+                valid_indices.append(idx)
+                
+        # Safe fallback: Only slice if we successfully isolated specific lanes. 
+        # Prevents road from disappearing entirely if vectors were too weak to measure.
+        if 0 < len(valid_indices) < len(matched_roads):
+            return matched_roads.loc[valid_indices]
             
-        start_pt = coords[0]
-        end_pt = coords[-1]
-        
-        # Vector 1: The direction the road segment is physically digitized
-        v_seg_x = end_pt[0] - start_pt[0]
-        v_seg_y = end_pt[1] - start_pt[1]
-        
-        # Vector 2: The direction from the start of the road segment to the final destination
-        v_dest_x = target_geom.x - start_pt[0]
-        v_dest_y = target_geom.y - start_pt[1]
-        
-        # Dot Product (A * B)
-        dot_product = (v_seg_x * v_dest_x) + (v_seg_y * v_dest_y)
-        
-        # Positive dot product means the angle between the segment and destination is < 90 degrees (Same general direction)
-        return dot_product > 0
+        return matched_roads
 
     @staticmethod
     def _get_xml_text(message_element, tag_name):
@@ -149,8 +155,6 @@ class TrafficIncidentEngine:
             inc_id = self._get_xml_text(message, 'ID')
             status = self._get_xml_text(message, 'INCIDENT_STATUS_EN').upper().strip()
             location_en = self._get_xml_text(message, 'LOCATION_EN').upper().strip()
-            landmark_en = self._get_xml_text(message, 'NEAR_LANDMARK_EN').upper().strip()
-            between_en = self._get_xml_text(message, 'BETWEEN_LANDMARK_EN').upper().strip()
             content_en = self._get_xml_text(message, 'CONTENT_EN').strip()
             content_upper = content_en.upper()
 
@@ -159,43 +163,19 @@ class TrafficIncidentEngine:
                 
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
+
+            # 🎯 EXACT COMPASS BOUND RESOLUTION
+            bound_compass = None
             text_pool = content_upper + " " + location_en
+            if any(kw in text_pool for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL"]):
+                bound_compass = "WEST"
+            elif any(kw in text_pool for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN"]):
+                bound_compass = "EAST"
+            elif any(kw in text_pool for kw in ["SOUTH BOUND", "SOUTHBOUND", "ABERDEEN BOUND", "STANLEY BOUND", "REPULSE BAY BOUND", "WONG CHUK HANG BOUND"]):
+                bound_compass = "SOUTH"
+            elif any(kw in text_pool for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR"]):
+                bound_compass = "NORTH"
 
-            # ==========================================================
-            # YOUR STEP 2: Identify direction between road and bound
-            # ==========================================================
-            target_geom = None
-            extracted_target_name = None
-            
-            # Find "XXX BOUND" or "TOWARDS XXX"
-            bound_match = re.search(r'([A-Z\s]+)\s+BOUND', text_pool)
-            if bound_match:
-                extracted_target_name = bound_match.group(1).strip()
-            else:
-                towards_match = re.search(r'(?:TOWARDS|HEADING TO|LEADING TO)\s+([A-Z0-9\s\-]+)', content_upper)
-                if towards_match:
-                    extracted_target_name = towards_match.group(1).strip()
-
-            if extracted_target_name:
-                clean_target = re.split(r'\b(IS|NEAR|BETWEEN|AND|PART|THE)\b', extracted_target_name)[0].strip()
-                
-                # Check major districts first (Central, Chai Wan, etc.)
-                for dist_name, coords in MAJOR_DISTRICTS_HK80.items():
-                    if dist_name in clean_target:
-                        target_geom = Point(coords)
-                        break
-                        
-                # Fallback to landmarks/roads if not a major district
-                if target_geom is None:
-                    if clean_target in self.landmark_cache:
-                        target_geom = self.landmark_cache[clean_target]
-                    else:
-                        for r in sorted(list(self.road_names_cache), key=len, reverse=True):
-                            if r in clean_target:
-                                target_geom = self.road_df[self.road_df['STREET_ENAME'] == r].geometry.unary_union.centroid
-                                break
-
-            # Find the main road where the incident occurred
             main_road = None
             if location_en in self.road_names_cache:
                 main_road = location_en
@@ -208,13 +188,6 @@ class TrafficIncidentEngine:
             if location_en != "BUSY ROAD SECTIONS" and not main_road:
                 continue
 
-            # Identify the Travel Direction column (handling Shapefile truncations safely)
-            dir_col = None
-            for col in self.road_df.columns:
-                if col in ['TRAVEL_DIR', 'TRAVEL_DIRECTION', 'TRAFFIC_DIR', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']:
-                    dir_col = col
-                    break
-
             # TRACK B: BROADCAST MODE
             if location_en == "BUSY ROAD SECTIONS":
                 sorted_roads = sorted(list(self.road_names_cache), key=len, reverse=True)
@@ -224,31 +197,11 @@ class TrafficIncidentEngine:
                 for cached_road in sorted_roads:
                     if re.search(r'\b' + re.escape(cached_road) + r'\b', text_to_scan):
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
-                        matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         
-                        valid_indices = []
-                        for idx, road_feat in matched_roads.iterrows():
-                            geom = road_feat['GEOMETRY']
-                            if geom is None: continue
-                            
-                            dir_val = "1"
-                            if dir_col and pd.notna(road_feat[dir_col]):
-                                dir_val = str(road_feat[dir_col]).strip().split('.')[0]
-                                
-                            # Value 1: Combined two-way road. Cannot filter, must keep.
-                            if dir_val == '1':
-                                valid_indices.append(idx)
-                                continue
-                                
-                            # Value 3: One-way. Apply your Step 3 Dot Product logic!
-                            if dir_val == '3' and self.is_correct_direction_vector(geom, target_geom):
-                                valid_indices.append(idx)
-                                
-                        # Fallback: if we accidentally filtered out everything, keep all segments to be safe
-                        if len(valid_indices) == 0 and not matched_roads.empty:
-                            valid_indices = matched_roads.index.tolist()
-                                    
-                        matched_roads = matched_roads.loc[valid_indices]
+                        # Fetch all segments and apply the unified Anti-Vector Engine filter
+                        matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
+                        matched_roads = self.filter_directional_bounds(matched_roads, bound_compass)
+                        
                         if not matched_roads.empty:
                             for _, road_feat in matched_roads.iterrows():
                                 matched_any_hki_road = True
@@ -266,28 +219,8 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            valid_indices = []
-            for idx, road_feat in matched_roads.iterrows():
-                geom = road_feat['GEOMETRY']
-                if geom is None: continue
-                
-                dir_val = "1"
-                if dir_col and pd.notna(road_feat[dir_col]):
-                    dir_val = str(road_feat[dir_col]).strip().split('.')[0]
-                
-                if dir_val == '1':
-                    valid_indices.append(idx)
-                    continue
-                    
-                # YOUR STEP 3: Apply Dot Product logic
-                if dir_val == '3' and self.is_correct_direction_vector(geom, target_geom):
-                    valid_indices.append(idx)
-                        
-            # Prevent 100% loss. If the math dropped everything, it was likely bad data. Restore it.
-            if len(valid_indices) == 0 and not matched_roads.empty:
-                valid_indices = matched_roads.index.tolist()
-
-            matched_roads = matched_roads.loc[valid_indices]
+            # Apply the unified Anti-Vector Engine filter directly to the target road
+            matched_roads = self.filter_directional_bounds(matched_roads, bound_compass)
 
             target_road_geom = matched_roads.geometry.unary_union
             pts_to_check = []
@@ -315,6 +248,10 @@ class TrafficIncidentEngine:
                 incident_records.append({'IncidentID': inc_id, 'Category': category, 'Location': location_en, 'Details': content_en})
                 continue
 
+            # Context Anchors
+            landmark_en = self._get_xml_text(message, 'NEAR_LANDMARK_EN').upper().strip()
+            between_en = self._get_xml_text(message, 'BETWEEN_LANDMARK_EN').upper().strip()
+            
             if landmark_en in self.landmark_cache: pts_to_check.append(self.landmark_cache[landmark_en])
             if between_en in self.landmark_cache: pts_to_check.append(self.landmark_cache[between_en])
 
