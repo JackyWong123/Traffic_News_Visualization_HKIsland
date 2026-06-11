@@ -8,7 +8,7 @@ from traffic_processor import TrafficIncidentEngine
 
 st.set_page_config(layout="wide", page_title="HKI Traffic Dashboard")
 
-# Custom CSS styling to lock headers parallel and standardize grid spacing
+# Custom CSS styling to align headers parallel and fix layout padding
 st.markdown("""
     <style>
         div[data-testid="stColumn"] {
@@ -19,6 +19,19 @@ st.markdown("""
         .unified-header {
             margin-bottom: 12px;
             height: 60px;
+        }
+        .table-header {
+            font-weight: bold;
+            background-color: #F0F2F6;
+            padding: 8px;
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }
+        .table-row {
+            padding: 8px 4px;
+            border-bottom: 1px solid #EDEDED;
+            display: flex;
+            align-items: center;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -41,7 +54,7 @@ def run_spatial_processing_pipeline():
 raw_incidents, gdf_spatial = run_spatial_processing_pipeline()
 
 # ==========================================
-# BI-DIRECTIONAL SELECTION & MEMORY LOCK
+# BI-DIRECTIONAL SELECTION & STATE MEMORY
 # ==========================================
 if "selected_inc_id" not in st.session_state:
     st.session_state.selected_inc_id = None
@@ -71,12 +84,6 @@ if not df_incidents.empty and 'lat' not in df_incidents.columns:
         df_rep = pd.DataFrame(rep_points)
         df_incidents = df_incidents.merge(df_rep, on='IncidentID', how='inner')
 
-# Resolve active index mapping to ensure selection persists across frames
-default_selection_idx = []
-if st.session_state.selected_inc_id in df_incidents['IncidentID'].values:
-    matched_row_idx = df_incidents[df_incidents['IncidentID'] == st.session_state.selected_inc_id].index[0]
-    default_selection_idx = [int(matched_row_idx)]
-
 CATEGORY_STYLES = {
     "Accident": {"color": "red", "icon": "car", "prefix": "fa"},
     "Road Works": {"color": "orange", "icon": "wrench", "prefix": "fa"},
@@ -88,42 +95,78 @@ CATEGORY_STYLES = {
 # ==========================================
 # INTERACTIVE SCREEN LAYOUT GENERATION
 # ==========================================
-col_table, col_map = st.columns([4, 5])
+col_table, col_map = st.columns([9, 10])
 
 with col_table:
-    st.markdown("<div class='unified-header'><h3>Traffic News Log</h3><p style='color:gray; font-size:13px; margin:0;'>Click anywhere on a cell row to project its corridor lines onto the map canvas.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='unified-header'><h3>Traffic News Log</h3></div>", unsafe_allow_html=True)
     
-    # Standard data table featuring search, sort, and fixed aligned container heights
-    selection = st.dataframe(
-        df_incidents,
-        use_container_width=True,
-        hide_index=True,
-        column_order=["IncidentID", "Category", "Location", "Details"],
-        on_select="rerun",
-        selection_mode="single-row",
-        height=550, 
-        selection_default={"selection": {"rows": default_selection_idx}},
-        key="stable_traffic_grid_view", # Static reference allows stable row highlighting
-        column_config={
-            "IncidentID": st.column_config.TextColumn("Case ID", width=70),
-            "Category": st.column_config.TextColumn("Type", width=100),
-            "Location": st.column_config.TextColumn("Corridor Context", width=180), 
-            "Details": st.column_config.TextColumn("Summary Log View", width=1000) # Maximum width stretches out long text rows
-        }
-    )
-    
-    # Sync structural table selection adjustments to session state memory
-    if selection and selection['selection']['rows']:
-        row_idx = selection['selection']['rows'][0]
-        table_selected_id = df_incidents.iloc[row_idx]['IncidentID']
-        if st.session_state.selected_inc_id != table_selected_id:
-            st.session_state.selected_inc_id = table_selected_id
-            st.rerun()
+    # 🔍 EXPLICIT SEARCH & SORT CONTROLS
+    col_search, col_sort = st.columns([2, 1])
+    with col_search:
+        search_query = st.text_input("🔍 Search logs (ID, Location, or Keyword)", "", placeholder="e.g. Wan Chai")
+    with col_sort:
+        sort_option = st.selectbox("Sort By", ["Default", "Case ID", "Incident Type", "Location"])
+
+    # Apply Search Filter Rules
+    df_filtered = df_incidents.copy()
+    if search_query:
+        df_filtered = df_filtered[
+            df_filtered['IncidentID'].astype(str).str.contains(search_query, case=False, na=False) |
+            df_filtered['Category'].str.contains(search_query, case=False, na=False) |
+            df_filtered['Location'].str.contains(search_query, case=False, na=False) |
+            df_filtered['Details'].str.contains(search_query, case=False, na=False)
+        ]
+
+    # Apply Explicit Sorting Rules
+    if sort_option == "Case ID":
+        df_filtered = df_filtered.sort_values(by="IncidentID", ascending=True)
+    elif sort_option == "Incident Type":
+        df_filtered = df_filtered.sort_values(by="Category", ascending=True)
+    elif sort_option == "Location":
+        df_filtered = df_filtered.sort_values(by="Location", ascending=True)
+
+    # 📋 TRADITIONAL TABLE HEADERS
+    st.markdown("""
+        <div class='table-header'>
+            <table style='width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px;'>
+                <tr>
+                    <td style='width:18%; font-weight:bold; color:#333;'>Case ID</td>
+                    <td style='width:17%; font-weight:bold; color:#333;'>Type</td>
+                    <td style='width:25%; font-weight:bold; color:#333;'>Corridor Context</td>
+                    <td style='width:40%; font-weight:bold; color:#333;'>Full Description Log</td>
+                </tr>
+            </table>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # 🎯 WRAPPED INTERACTIVE TABLE DATA ROWS
+    with st.container(height=450):
+        if df_filtered.empty:
+            st.info("No matching traffic incidents found.")
+        else:
+            for _, row in df_filtered.iterrows():
+                is_selected = (row['IncidentID'] == st.session_state.selected_inc_id)
+                
+                # Setup a layout row using native columns to handle text wrapping flawlessly
+                r_cols = st.columns([18, 17, 25, 40])
+                
+                # Column 1: Action Select Button acting as the Case ID cell
+                btn_label = f"👉 {row['IncidentID']}" if is_selected else str(row['IncidentID'])
+                if r_cols[0].button(btn_label, key=f"row_id_{row['IncidentID']}", use_container_width=True, type="primary" if is_selected else "secondary"):
+                    st.session_state.selected_inc_id = row['IncidentID']
+                    st.rerun()
+                
+                # Column 2, 3, & 4: Markdown strings that wrap automatically when long
+                r_cols[1].markdown(f"<div style='padding-top:6px; font-size:13px;'>{row['Category']}</div>", unsafe_allow_html=True)
+                r_cols[2].markdown(f"<div style='padding-top:6px; font-size:13px; font-weight:bold;'>{row['Location']}</div>", unsafe_allow_html=True)
+                r_cols[3].markdown(f"<div style='padding-top:6px; font-size:13px; line-height:1.4; color:#444;'>{row['Details']}</div>", unsafe_allow_html=True)
+                
+                st.markdown("<div class='table-row'></div>", unsafe_allow_html=True)
 
 with col_map:
-    st.markdown("<div class='unified-header'><h3>Map Visualization</h3><p style='color:gray; font-size:13px; margin:0;'>Click markers directly to synchronize the active table log row context.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='unified-header'><h3>Map Visualization</h3></div>", unsafe_allow_html=True)
     
-    # Establish stationary coordinate frames BEFORE drawing canvas to prevent popups floating away
+    # Establish persistent map coordinates BEFORE loading map canvas to stop flying popups
     map_center = [22.28552, 114.15769]
     zoom_level = 11
     
@@ -146,7 +189,7 @@ with col_map:
         <div style='font-family: Arial, sans-serif; font-size: 13px; width: 220px; padding: 3px;'>
             <b style='color: #222;'>📍 {row['Location']}</b><br>
             <span style='color: #E63946; font-weight: bold;'>• {row['Category']}</span><br>
-            <p style='margin: 5px 0 0 0; color: #555; font-size: 11px;'>Full descriptive logs loaded below.</p>
+            <p style='margin: 5px 0 0 0; color: #555; font-size: 11px; line-height:1.3;'>Full text is completely wrapped in the log table.</p>
         </div>
         """
         
@@ -168,7 +211,7 @@ with col_map:
 
     map_data = st_folium(m, width="100%", height=550, returned_objects=["last_object_clicked"])
     
-    # Nearest-Neighbor matching solves click synchronization flawlessly
+    # Nearest-Neighbor matching engine overrides float rounding problems completely
     if map_data and map_data.get("last_object_clicked") and not df_incidents.empty:
         click_lat = map_data["last_object_clicked"]["lat"]
         click_lng = map_data["last_object_clicked"]["lng"]
