@@ -58,7 +58,7 @@ class TrafficIncidentEngine:
             self.road_names_cache = set(self.road_df['STREET_ENAME'].dropna().str.upper().str.strip())
 
     def classify_incident(self, content_upper):
-        """ENGINE FEATURE: Categorizes traffic reports based on text pattern matching."""
+        """Categorizes traffic reports based on text pattern matching."""
         if any(kw in content_upper for kw in ["ACCIDENT", "COLLISION", "CAR CRASH"]):
             return "Accident"
         elif any(kw in content_upper for kw in ["ROAD WORKS", "ROADWORKS", "MAINTENANCE", "REPAIR"]):
@@ -78,7 +78,7 @@ class TrafficIncidentEngine:
         return ""
 
     def process_active_incidents(self):
-        """Parses XML logs and applies watertight HKI spatial selection guardrails."""
+        """Parses XML logs using strict official IRN direction schema rules."""
         if self.road_df is None:
             self.initialize_spatial_basemaps()
 
@@ -108,9 +108,18 @@ class TrafficIncidentEngine:
                 continue
                 
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
-            
-            # Engine Rule: Determine Category classification mapping
             category = self.classify_incident(content_upper)
+
+            # Extract traffic direction bound context out of the news content text
+            bound_target = None
+            if any(kw in active_text_block or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND"]):
+                bound_target = "WEST"
+            elif any(kw in active_text_block or kw in location_en for kw in ["WAN CHAI BOUND", "CHAI WAN BOUND", "EAST BOUND", "CAUSEWAY BAY BOUND"]):
+                bound_target = "EAST"
+            elif any(kw in active_text_block or kw in location_en for kw in ["ABERDEEN BOUND", "SOUTH BOUND", "WONG CHUK HANG BOUND"]):
+                bound_target = "SOUTH"
+            elif any(kw in active_text_block or kw in location_en for kw in ["MONG KOK BOUND", "KOWLOON BOUND", "NORTH BOUND"]):
+                bound_target = "NORTH"
 
             main_road = None
             if location_en in self.road_names_cache:
@@ -135,12 +144,32 @@ class TrafficIncidentEngine:
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
                         matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         
-                        for _, road_feat in matched_roads.iterrows():
-                            matched_any_hki_road = True
-                            spatial_features_list.append({
-                                'IncidentID': inc_id, 'RoadName': cached_road, 
-                                'RouteID': str(road_feat.get('ROUTE_ID', 'UNKNOWN')), 'geometry': road_feat['GEOMETRY']
-                            })
+                        dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE']), None)
+                        valid_indices = []
+                        for idx, road_feat in matched_roads.iterrows():
+                            geom = road_feat['GEOMETRY']
+                            if geom is None: continue
+                            
+                            # 🎯 SPEC FIX: Value '1' means permitted in both directions. Keep it immediately.
+                            if not bound_target or (dir_col and str(road_feat[dir_col]).strip() == '1'):
+                                valid_indices.append(idx)
+                                continue
+                            
+                            # Value '3' means restricted to digitized path direction. Run heading vector calculations:
+                            coords = list(geom.coords) if geom.geom_type == 'LineString' else (list(max(geom.geoms, key=lambda l: l.length).coords) if geom.geom_type == 'MultiLineString' and not geom.is_empty else [])
+                            if len(coords) >= 2:
+                                dx, dy = coords[-1][0] - coords[0][0], coords[-1][1] - coords[0][1]
+                                if (bound_target == "WEST" and dx < -5) or (bound_target == "EAST" and dx > 5) or (bound_target == "SOUTH" and dy < -5) or (bound_target == "NORTH" and dy > 5):
+                                    valid_indices.append(idx)
+                                    
+                        if valid_indices:
+                            matched_roads = matched_roads.loc[valid_indices]
+                            for _, road_feat in matched_roads.iterrows():
+                                matched_any_hki_road = True
+                                spatial_features_list.append({
+                                    'IncidentID': inc_id, 'RoadName': cached_road, 
+                                    'RouteID': str(road_feat.get('ROUTE_ID', 'UNKNOWN')), 'geometry': road_feat['GEOMETRY']
+                                })
                 
                 if matched_any_hki_road:
                     incident_records.append({'IncidentID': inc_id, 'Category': category, 'Location': location_en, 'Details': content_en})
@@ -150,6 +179,58 @@ class TrafficIncidentEngine:
             matched_roads = self.road_df[self.road_df['STREET_ENAME'] == main_road]
             if matched_roads.empty:
                 continue
+
+            # Identify target column name variant
+            dir_col = None
+            for col in matched_roads.columns:
+                if col in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']:
+                    dir_col = col
+                    break
+
+            # Directional Filter Execution Loop
+            valid_indices = []
+            for idx, road_feat in matched_roads.iterrows():
+                geom = road_feat['GEOMETRY']
+                if geom is None: continue
+                if not bound_target:
+                    valid_indices.append(idx)
+                    continue
+                    
+                is_combined_two_way = False
+                if dir_col and str(road_feat[dir_col]).strip() == '1':
+                    is_combined_two_way = True
+                        
+                # 🎯 SPEC FIX: If Travel Direction equals '1', it's a shared two-way asset. Save it.
+                if is_combined_two_way:
+                    valid_indices.append(idx)
+                    continue
+                    
+                # If Travel Direction equals '3', evaluate its digitized direction coordinate delta vector
+                if geom.geom_type == 'LineString':
+                    coords = list(geom.coords)
+                elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
+                    coords = list(max(geom.geoms, key=lambda l: l.length).coords)
+                else: coords = []
+                    
+                if len(coords) >= 2:
+                    dx = coords[-1][0] - coords[0][0] # Easting Vector Delta
+                    dy = coords[-1][1] - coords[0][1] # Northing Vector Delta
+                    
+                    is_match = False
+                    if bound_target == "WEST" and dx < -5:
+                        is_match = True
+                    elif bound_target == "EAST" and dx > 5:
+                        is_match = True
+                    elif bound_target == "SOUTH" and dy < -5:
+                        is_match = True
+                    elif bound_target == "NORTH" and dy > 5:
+                        is_match = True
+                        
+                    if is_match:
+                        valid_indices.append(idx)
+                        
+            if valid_indices:
+                matched_roads = matched_roads.loc[valid_indices]
 
             target_road_geom = matched_roads.geometry.unary_union
             pts_to_check = []
