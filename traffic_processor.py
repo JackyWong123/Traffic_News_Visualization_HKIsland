@@ -2,7 +2,7 @@
 import xml.etree.ElementTree as ET
 import re
 import pandas as pd
-import geopandas as gpd  # 🎯 FIXED SYNTAX TYPO HERE
+import geopandas as gpd
 from shapely.geometry import MultiPoint
 from shapely.ops import nearest_points
 
@@ -141,9 +141,9 @@ class TrafficIncidentEngine:
 
             # Map descriptive direction targets to vector bounds
             bound_target = None
-            if any(kw in content_upper or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND"]):
+            if any(kw in content_upper or kw in location_en for kw in ["CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "TO CENTRAL"]):
                 bound_target = "WEST"
-            elif any(kw in content_upper or kw in location_en for kw in ["WAN CHAI BOUND", "CHAI WAN BOUND", "EAST BOUND", "CAUSEWAY BAY BOUND"]):
+            elif any(kw in content_upper or kw in location_en for kw in ["WAN CHAI BOUND", "CHAI WAN BOUND", "EAST BOUND", "CAUSEWAY BAY BOUND", "TO CHAI WAN"]):
                 bound_target = "EAST"
             elif any(kw in content_upper or kw in location_en for kw in ["ABERDEEN BOUND", "SOUTH BOUND", "WONG CHUK HANG BOUND"]):
                 bound_target = "SOUTH"
@@ -173,7 +173,13 @@ class TrafficIncidentEngine:
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
                         matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         
-                        dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']), None)
+                        # 🎯 FIX: Substring scan protects against truncated attribute names
+                        dir_col = None
+                        for col in matched_roads.columns:
+                            if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
+                                dir_col = col
+                                break
+                                
                         valid_indices = []
                         for idx, road_feat in matched_roads.iterrows():
                             geom = road_feat['GEOMETRY']
@@ -183,7 +189,6 @@ class TrafficIncidentEngine:
                             if dir_col and pd.notna(road_feat[dir_col]):
                                 dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                                 
-                            # Value 1 = Two-Way. Keep it immediately.
                             if not bound_target or dir_val == '1':
                                 valid_indices.append(idx)
                                 continue
@@ -209,9 +214,14 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            dir_col = next((c for c in matched_roads.columns if c in ['TRAVEL_DIRECTION', 'TRAFFIC_DIRECTION', 'DIR_CODE', 'DIRECTION']), None)
+            # 🎯 FIX: Substring scanner ensures 'TRAVEL_DIR' matches properly
+            dir_col = None
+            for col in matched_roads.columns:
+                if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
+                    dir_col = col
+                    break
 
-            # ST_TRACKER CARRIAGEWAY VALIDATION FILTER LOOP
+            # Carriageway Validation Loop
             valid_indices = []
             for idx, road_feat in matched_roads.iterrows():
                 geom = road_feat['GEOMETRY']
@@ -230,10 +240,11 @@ class TrafficIncidentEngine:
                     valid_indices.append(idx)
                     continue
                     
-                # Code 3: One-Way. Run coordinate quadrant check.
+                # Code 3: One-Way Carriageway. Evaluate coordinate trajectory vector.
                 if dir_val == '3' and self.is_correct_direction(geom, bound_target):
                     valid_indices.append(idx)
                         
+            # Enforce slicing to drop the incorrect bound
             matched_roads = matched_roads.loc[valid_indices]
             if matched_roads.empty:
                 continue
