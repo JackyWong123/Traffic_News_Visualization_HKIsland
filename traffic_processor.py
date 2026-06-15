@@ -81,6 +81,16 @@ class TrafficIncidentEngine:
                 dir_col = col
                 break
                 
+        # 🎯 DYNAMIC ENVIRONMENT ONSHORE AXIS DETECTOR
+        # Inspects library definitions to see if the cloud environment flipped coordinate order arrays
+        is_northing_first = False
+        if matched_roads.crs and hasattr(matched_roads.crs, 'axis_info'):
+            try:
+                if matched_roads.crs.axis_info[0].direction.lower() == 'north':
+                    is_northing_first = True
+            except:
+                pass
+                
         valid_indices = []
         for idx, road_feat in matched_roads.iterrows():
             geom = road_feat['GEOMETRY']
@@ -91,7 +101,7 @@ class TrafficIncidentEngine:
                 dir_val = str(road_feat[dir_col]).strip().split('.')[0]
                 
             if dir_val == '3':
-                # It is a one-way carriageway. Evaluate its physical trajectory vector.
+                # Extract coordinate sequence pairs out of geometry layers safely
                 if geom.geom_type == 'LineString':
                     coords = list(geom.coords)
                 elif geom.geom_type == 'MultiLineString' and not geom.is_empty:
@@ -103,11 +113,23 @@ class TrafficIncidentEngine:
                 if len(coords) < 2:
                     valid_indices.append(idx)
                     continue
-                    
-                dx = coords[-1][0] - coords[0][0] # Delta Easting
-                dy = coords[-1][1] - coords[0][1] # Delta Northing
                 
-                # ANTI-VECTOR RULE: If it strongly contradicts the destination compass target, drop it!
+                first_node = coords[0]
+                last_node = coords[-1]
+                
+                if is_northing_first:
+                    # Cloud server sequence standard rules tracking
+                    n_start, e_start = first_node[0], first_node[1]
+                    n_end, e_end = last_node[0], last_node[1]
+                else:
+                    # Traditional workstation desktop workspace standards rules tracking
+                    e_start, n_start = first_node[0], first_node[1]
+                    e_end, n_end = last_node[0], last_node[1]
+                    
+                dx = e_end - e_start # True Easting trajectory vector change
+                dy = n_end - n_start # True Northing trajectory vector change
+                
+                # ANTI-VECTOR CRITERIA RANGE SELECTOR
                 keep_segment = True
                 if bound_compass == "WEST" and dx > 10: keep_segment = False
                 if bound_compass == "EAST" and dx < -10: keep_segment = False
@@ -117,11 +139,10 @@ class TrafficIncidentEngine:
                 if keep_segment:
                     valid_indices.append(idx)
             else:
-                # Value 1 = Two-Way Link. Must be retained.
+                # Code 1: Combined Undivided Highway/Street Asset. Must be retained.
                 valid_indices.append(idx)
                 
-        # Safe fallback: Only slice if we successfully isolated specific lanes. 
-        # Prevents road from disappearing entirely if vectors were too weak to measure.
+        # Allocation safeguards enforce fallback overrides if total loss calculation triggers
         if 0 < len(valid_indices) < len(matched_roads):
             return matched_roads.loc[valid_indices]
             
@@ -164,16 +185,16 @@ class TrafficIncidentEngine:
             active_text_block = content_upper.split("RESUMED NORMAL")[0]
             category = self.classify_incident(content_upper)
 
-            # 🎯 EXACT COMPASS BOUND RESOLUTION
+            # 🎯 EXTENDED WHOLE HONG KONG GEOGRAPHIC KEYWORD POOL MATRICES
             bound_compass = None
             text_pool = content_upper + " " + location_en
-            if any(kw in text_pool for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL"]):
+            if any(kw in text_pool for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL", "TUEN MUN BOUND", "YUEN LONG BOUND", "TSUEN WAN BOUND"]):
                 bound_compass = "WEST"
-            elif any(kw in text_pool for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN"]):
+            elif any(kw in text_pool for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN", "SAI KUNG BOUND", "MA ON SHAN BOUND", "TAI PO BOUND"]):
                 bound_compass = "EAST"
             elif any(kw in text_pool for kw in ["SOUTH BOUND", "SOUTHBOUND", "ABERDEEN BOUND", "STANLEY BOUND", "REPULSE BAY BOUND", "WONG CHUK HANG BOUND"]):
                 bound_compass = "SOUTH"
-            elif any(kw in text_pool for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR"]):
+            elif any(kw in text_pool for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR", "SHATIN BOUND", "SHA TIN BOUND", "FANLING BOUND", "SHEUNG SHUI BOUND", "KWUN TONG BOUND"]):
                 bound_compass = "NORTH"
 
             main_road = None
@@ -198,7 +219,6 @@ class TrafficIncidentEngine:
                     if re.search(r'\b' + re.escape(cached_road) + r'\b', text_to_scan):
                         text_to_scan = text_to_scan.replace(cached_road, " __SPATIAL_MATCH__ ")
                         
-                        # Fetch all segments and apply the unified Anti-Vector Engine filter
                         matched_roads = self.road_df[self.road_df['STREET_ENAME'] == cached_road]
                         matched_roads = self.filter_directional_bounds(matched_roads, bound_compass)
                         
@@ -219,7 +239,6 @@ class TrafficIncidentEngine:
             if matched_roads.empty:
                 continue
 
-            # Apply the unified Anti-Vector Engine filter directly to the target road
             matched_roads = self.filter_directional_bounds(matched_roads, bound_compass)
 
             target_road_geom = matched_roads.geometry.unary_union
