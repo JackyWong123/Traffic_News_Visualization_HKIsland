@@ -8,23 +8,35 @@ from shapely.geometry import Point, MultiPoint, mapping
 from shapely.ops import nearest_points
 
 class TrafficIncidentEngine:
-    def __init__(self, road_path, boundary_path, building_path, xml_path, distance_threshold=500):
+    def __init__(self, road_path, boundary_path, building_path, xml_path, intersection_path=None, distance_threshold=500):
         self.road_path = road_path
         self.boundary_path = boundary_path
         self.building_path = building_path  
         self.xml_path = xml_path
+        # Allow optional or mandatory tracking for the new intersection file layer
+        self.intersection_path = intersection_path or "hki_intersection.geojson"
         self.distance_threshold = distance_threshold
         
         self.road_df = None
+        self.intersection_df = None
         self.landmark_cache = {}
-        self.road_names_cache = [] # Converted to a sorted list for sequential text masking
+        self.road_names_cache = []
         
     def initialize_spatial_basemaps(self):
-        """Loads GIS layers out of compressed files and sets up the spatial environment."""
+        """Loads GIS layers and sets up the intersection node graph structures."""
         self.road_df = gpd.read_file(f"zip://{self.road_path}")
         boundary_df = gpd.read_file(f"zip://{self.boundary_path}")
         building_df = gpd.read_file(f"zip://{self.building_path}") 
         
+        # Load the network intersection geojson node map dataset
+        try:
+            self.intersection_df = gpd.read_file(self.intersection_path)
+            self.intersection_df.columns = self.intersection_df.columns.str.upper()
+            self.intersection_df = self.intersection_df.set_geometry("GEOMETRY").set_crs(epsg=2326, allow_override=True)
+        except Exception as e:
+            # Create an empty matching fallback placeholder if file path fails to stream
+            self.intersection_df = gpd.GeoDataFrame(columns=['GEOMETRY', 'INT_ENAME'], crs=2326)
+
         self.road_df.columns = self.road_df.columns.str.upper()
         boundary_df.columns = boundary_df.columns.str.upper()
         building_df.columns = building_df.columns.str.upper()
@@ -55,7 +67,6 @@ class TrafficIncidentEngine:
 
         if 'STREET_ENAME' in self.road_df.columns:
             raw_names = set(self.road_df['STREET_ENAME'].dropna().str.upper().str.strip())
-            # 🎯 FIX PART 2A: Sort by length descending to process long names before short sub-names
             self.road_names_cache = sorted(list(raw_names), key=len, reverse=True)
 
     @staticmethod
@@ -106,19 +117,17 @@ class TrafficIncidentEngine:
         extracted_roads = []
         working_text = text_pool
         
-        # 🎯 FIX PART 2B: Mask strings step-by-step so "Hammer Hill Road" shields against "Hill Road"
         for road_name in self.road_names_cache:
             pattern = r'\b' + re.escape(road_name) + r'\b'
             if re.search(pattern, working_text):
                 extracted_roads.append(road_name)
-                # Redact matched characters with placeholder text to prevent sub-string collision matches
                 working_text = re.sub(pattern, "X" * len(road_name), working_text)
 
         # Task A3: Identify Format Layout Configuration
         format_layout = "GENERAL"
         if location_en == "BUSY ROAD SECTIONS":
             format_layout = "BROADCAST"
-        elif "JUNCTION" in text_pool or len(extracted_roads) >= 2 and any(kw in text_pool for kw in ["AND", "CORNER OF"]):
+        elif "JUNCTION" in text_pool or (len(extracted_roads) >= 2 and any(kw in text_pool for kw in ["AND", "CORNER OF"])):
             format_layout = "JUNCTION"
         elif "BETWEEN" in text_pool or between_en:
             format_layout = "BETWEEN"
@@ -154,11 +163,11 @@ class TrafficIncidentEngine:
     # PART 1B: THE GEOSPATIAL PROCESSING ENGINE (SPATIAL ROUTING PIPELINE)
     # =========================================================================
     def execute_geospatial_processing(self, nlp_payload):
-        """Processes geometries based on NLP parameters and applies trajectory vector filtering."""
+        """Processes geometries using explicit intersection topology lookups and trajectory validation."""
         if not nlp_payload or not nlp_payload["extracted_roads"]:
             return None
 
-        # Discover Travel Direction database attribute configurations
+        # Discover Travel Direction database attributes
         dir_col = None
         for col in self.road_df.columns:
             if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
@@ -173,7 +182,6 @@ class TrafficIncidentEngine:
                     is_northing_first = True
             except: pass
 
-        # Helper: Directional Trajectory Vector filtering loop logic
         def filter_segments(gdf, compass):
             if not compass or gdf.empty: return gdf
             valid_idx = []
@@ -206,45 +214,73 @@ class TrafficIncidentEngine:
                     valid_idx.append(idx)
             return gdf.loc[valid_idx] if 0 < len(valid_idx) < len(gdf) else gdf
 
-        # Task B1: Extract and route spatial configurations based on event format layouts
         output_geometry = None
         spatial_features = []
 
-        # Format 1: Junction Node Layout (Returns a single point node coordinate)
+        # =====================================================================
+        # OPTIMIZED TASK B1: DETERMINISTIC LINK-NODE TOPOLOGY JUNCTION ROUTER
+        # =====================================================================
         if nlp_payload["format"] == "JUNCTION" and len(nlp_payload["extracted_roads"]) >= 2:
-            road_a = self.road_df[self.road_df['STREET_ENAME'] == nlp_payload["extracted_roads"][0]]
-            road_b = self.road_df[self.road_df['STREET_ENAME'] == nlp_payload["extracted_roads"][1]]
+            road_a_name = nlp_payload["extracted_roads"][0]
+            road_b_name = nlp_payload["extracted_roads"][1]
             
-            if not road_a.empty and not road_b.empty:
-                geom_a = road_a.geometry.unary_union
-                geom_b = road_b.geometry.unary_union
-                intersection = geom_a.intersection(geom_b)
+            # Isolate candidate spatial edge sequences from database logs
+            road_a_df = self.road_df[self.road_df['STREET_ENAME'] == road_a_name]
+            road_b_df = self.road_df[self.road_df['STREET_ENAME'] == road_b_name]
+            
+            if not road_a_df.empty and not road_b_df.empty and not self.intersection_df.empty:
+                # Compile candidate component unique Link ID keys
+                route_ids_a = set(road_a_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
+                route_ids_b = set(road_b_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
                 
-                if not intersection.is_empty:
-                    output_geometry = intersection.centroid
-                else:
-                    p1, _ = nearest_points(geom_a, geom_b)
-                    output_geometry = p1
+                # Scan for connection keys inside connection properties columns
+                rd_cols = [c for c in self.intersection_df.columns if c.startswith('RD_ID_')]
+                
+                # Method A: Top-tier verification loop matches explicit relational IDs
+                for idx, node_row in self.intersection_df.iterrows():
+                    node_links = set()
+                    for col in rd_cols:
+                        if pd.notna(node_row[col]):
+                            node_links.add(str(node_row[col]).split('.')[0])
                     
+                    # Graph Validation: Node links must connect with both road sets simultaneously
+                    if node_links.intersection(route_ids_a) and node_links.intersection(route_ids_b):
+                        output_geometry = node_row['GEOMETRY']
+                        break
+                
+                # Method B: Secondary fallback filters node via direct street name text
+                if output_geometry is None:
+                    name_matches = self.intersection_df[
+                        self.intersection_df['INT_ENAME'].str.contains(road_a_name, na=False) &
+                        self.intersection_df['INT_ENAME'].str.contains(road_b_name, na=False)
+                    ]
+                    if not name_matches.empty:
+                        output_geometry = name_matches.iloc[0]['GEOMETRY']
+
+            # Method C: Ultimate geometric calculation fallback to safeguard data pipeline
+            if output_geometry is None and not road_a_df.empty and not road_b_df.empty:
+                geom_a = road_a_df.geometry.unary_union
+                geom_b = road_b_df.geometry.unary_union
+                intersection = geom_a.intersection(geom_b)
+                output_geometry = intersection.centroid if not intersection.is_empty else nearest_points(geom_a, geom_b)[0]
+                
             if output_geometry:
                 spatial_features.append({
                     "type": "Feature",
                     "geometry": mapping(output_geometry),
                     "properties": {
                         "IncidentID": nlp_payload["incident_id"],
-                        "RoadName": nlp_payload["extracted_roads"][0],
+                        "RoadName": road_a_name,
                         "RouteID": "INTERSECTION_NODE"
                     }
                 })
 
-        # Format 2: Segment Length Layouts (Near, Between, Broadcast, General)
+        # Format 2: Continuous Line Segment Layouts (Near, Between, Broadcast, General)
         else:
-            # 🎯 FIX PART 2C: Process all matched unique roads to support multi-location alerts
             combined_gdf_list = []
             for r_name in nlp_payload["extracted_roads"]:
                 r_segments = self.road_df[self.road_df['STREET_ENAME'] == r_name]
                 if not r_segments.empty:
-                    # Task B2: Run vector mapping routines to isolate matching bounds
                     filtered_segments = filter_segments(r_segments, nlp_payload["bound_compass"])
                     combined_gdf_list.append(filtered_segments)
                     
@@ -252,7 +288,6 @@ class TrafficIncidentEngine:
                 merged_roads_gdf = pd.concat(combined_gdf_list)
                 target_road_geom = merged_roads_gdf.geometry.unary_union
                 
-                # Context Anchor Bounding Buffers
                 pts_context = []
                 if nlp_payload["near_landmark"] in self.landmark_cache:
                     pts_context.append(self.landmark_cache[nlp_payload["near_landmark"]])
@@ -302,10 +337,10 @@ class TrafficIncidentEngine:
                                 }
                             })
 
-        # Task B3: Structure final configurations into a standardized exchange dictionary
         if not spatial_features:
             return None
 
+        # Task B3: Structure final configurations into a standardized exchange dictionary
         spatial_json_payload = {
             "incident_id": nlp_payload["incident_id"],
             "type": nlp_payload["type"],
@@ -321,7 +356,7 @@ class TrafficIncidentEngine:
         return spatial_json_payload
 
     def process_active_incidents(self):
-        """Unified runner script that coordinates Part A and Part B pipelines."""
+        """Unified runner script coordinating Part 1A and Part 1B pipelines."""
         if self.road_df is None:
             self.initialize_spatial_basemaps()
 
@@ -344,11 +379,10 @@ class TrafficIncidentEngine:
             nlp_payload = self.analyze_incident_language(message_element)
             if not nlp_payload: continue
 
-            # Run Part 1b Pipeline: Geospatial Engine
+            # Run Part 1b Pipeline: Geospatial Routing Engine
             spatial_output = self.execute_geospatial_processing(nlp_payload)
             if not spatial_output: continue
 
-            # Cache values for downstream application layer mapping requirements
             incident_records.append({
                 'IncidentID': spatial_output["incident_id"],
                 'Category': spatial_output["type"],
@@ -357,10 +391,8 @@ class TrafficIncidentEngine:
                 'Details': spatial_output["details"]
             })
             
-            # Unpack spatial geojson features array vectors
             master_spatial_features.extend(spatial_output["geojson"]["features"])
 
-        # Construct unified DataFrame structures matching app.py expectations
         df_incidents = pd.DataFrame(incident_records).drop_duplicates(subset=['IncidentID'])
         
         if master_spatial_features:
