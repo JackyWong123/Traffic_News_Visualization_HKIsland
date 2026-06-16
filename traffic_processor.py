@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 import re
 import json
 import pandas as pd
-import geopandas as gpd  # 🎯 FIXED SYNTAX TYPO HERE
+import geopandas as gpd
 from shapely.geometry import Point, MultiPoint, shape, mapping
 from shapely.ops import nearest_points
 
@@ -27,7 +27,6 @@ class TrafficIncidentEngine:
         boundary_df = gpd.read_file(f"zip://{self.boundary_path}")
         building_df = gpd.read_file(f"zip://{self.building_path}") 
         
-        # Load the network intersection geojson node map dataset
         try:
             import os
             base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -84,104 +83,124 @@ class TrafficIncidentEngine:
         return ""
 
     # =========================================================================
-    # PART 1A: THE LANGUAGE PROCESSING ENGINE (NLP PIPELINE)
+    # PART 1A: THE LANGUAGE PROCESSING ENGINE (NLP COMPOUND EXPLODER)
     # =========================================================================
-    def analyze_incident_language(self, message_block):
-        """Parses text narratives into structured, decoupled data packages."""
+    def explode_and_analyze_message(self, message_block):
+        """Identifies multiple incidents inside a single text block and explodes them into individual cases."""
         inc_id = self._get_xml_text(message_block, 'ID')
         status = self._get_xml_text(message_block, 'INCIDENT_STATUS_EN').upper().strip()
         location_en = self._get_xml_text(message_block, 'LOCATION_EN').upper().strip()
-        landmark_en = self._get_xml_text(message_block, 'NEAR_LANDMARK_EN').upper().strip()
-        between_en = self._get_xml_text(message_block, 'BETWEEN_LANDMARK_EN').upper().strip()
         content_en = self._get_xml_text(message_block, 'CONTENT_EN').strip()
         content_upper = content_en.upper()
         
         if status == "CLOSED" or not location_en:
-            return None
+            return []
             
         active_text_block = content_upper.split("RESUMED NORMAL")[0]
-        text_pool = active_text_block + " " + location_en
-
-        # Task A1: Identify Incident Type
-        incident_type = "General Alert"
-        if any(kw in text_pool for kw in ["ACCIDENT", "COLLISION", "CAR CRASH"]):
-            incident_type = "Accident"
-        elif any(kw in text_pool for kw in ["ROAD WORKS", "ROADWORKS", "MAINTENANCE", "REPAIR"]):
-            incident_type = "Road Works"
-        elif any(kw in text_pool for kw in ["TRAFFIC QUEUE", "CONGESTION", "BUSY", "SLOW TRAFFIC"]):
-            incident_type = "Congestion"
-        elif any(kw in text_pool for kw in ["CLOSED", "POLICE INVESTIGATION", "BLOCKAGE"]):
-            incident_type = "Road Closure"
-
-        # Task A2: Identify Scale / Extent / Seriousness
-        scale_extent = "Minor"
-        if any(kw in text_pool for kw in ["ALL LANES CLOSED", "SERIOUS", "COMPLETELY BLOCKED", "FATAL"]):
-            scale_extent = "Major"
-        elif any(kw in text_pool for kw in ["PART OF THE LANES", "PART OF LANES", "SLOW TRAFFIC", "BUSY", "QUEUE"]):
-            scale_extent = "Moderate"
-
-        # Task A4: Accurate Location Extraction via Sequential Substring Masking
-        extracted_roads = []
-        working_text = text_pool
         
+        # Discover where roads appear chronologically inside the text block
+        road_mentions = []
         for road_name in self.road_names_cache:
             pattern = r'\b' + re.escape(road_name) + r'\b'
-            if re.search(pattern, working_text):
-                extracted_roads.append(road_name)
-                working_text = re.sub(pattern, "X" * len(road_name), working_text)
+            for match in re.finditer(pattern, active_text_block):
+                road_mentions.append({
+                    "name": road_name,
+                    "start": match.start(),
+                    "end": match.end()
+                })
+                
+        if not road_mentions:
+            return []
 
-        # Task A3: Identify Format Layout Configuration
-        format_layout = "GENERAL"
-        if location_en == "BUSY ROAD SECTIONS":
-            format_layout = "BROADCAST"
-        elif "JUNCTION" in text_pool or (len(extracted_roads) >= 2 and any(kw in text_pool for kw in ["AND", "CORNER OF"])):
-            format_layout = "JUNCTION"
-        elif "BETWEEN" in text_pool or between_en:
-            format_layout = "BETWEEN"
-        elif "NEAR" in text_pool or landmark_en:
-            format_layout = "NEAR"
+        # Sort road mentions chronologically by their character position index in the text
+        road_mentions = sorted(road_mentions, key=lambda x: x["start"])
+        
+        # 🎯 FIX STEP 1: Filter out nested substrings (e.g., prevent 'Hill Road' from hijacking 'Hammer Hill Road')
+        clean_mentions = []
+        for i, current in enumerate(road_mentions):
+            is_sub_match = False
+            for other in road_mentions:
+                if current != other and other["start"] <= current["start"] and other["end"] >= current["end"]:
+                    is_sub_match = True
+                    break
+            if not is_sub_match:
+                clean_mentions.append(current)
 
-        # Compass Target Direction Extractor
-        bound_compass = None
-        if any(kw in text_pool for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL", "TUEN MUN BOUND", "YUEN LONG BOUND", "TSUEN WAN BOUND"]):
-            bound_compass = "WEST"
-        elif any(kw in text_pool for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN", "SAI KUNG BOUND", "MA ON SHAN BOUND", "TAI PO BOUND"]):
-            bound_compass = "EAST"
-        elif any(kw in text_pool for kw in ["SOUTH BOUND", "SOUTHBOUND", "ABERDEEN BOUND", "STANLEY BOUND", "REPULSE BAY BOUND", "WONG CHUK HANG BOUND"]):
-            bound_compass = "SOUTH"
-        elif any(kw in text_pool for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR", "SHATIN BOUND", "SHA TIN BOUND", "FANLING BOUND", "SHEUNG SHUI BOUND", "KWUN TONG BOUND"]):
-            bound_compass = "NORTH"
+        # 🎯 FIX STEP 2: Character-slice the text into isolated sub-case clauses
+        sub_cases_payloads = []
+        for idx, mention in enumerate(clean_mentions):
+            slice_start = mention["start"]
+            # Slice up until the start of the next road text section, or the very end of the document block
+            slice_end = clean_mentions[idx + 1]["start"] if idx + 1 < len(clean_mentions) else len(active_text_block)
+            
+            # Extract the pure structural sentence block dedicated to this road feature
+            localized_clause = active_text_block[slice_start:slice_end].strip()
+            raw_localized_clause_en = content_en[slice_start:slice_end].strip()
+            
+            # Reconstruct trailing context data words if a text split drops important context
+            if idx == 0 and slice_start > 0:
+                prefix_context = active_text_block[:slice_start]
+                localized_clause = prefix_context + " " + localized_clause
+                raw_localized_clause_en = content_en[:slice_start] + " " + raw_localized_clause_en
 
-        return {
-            "incident_id": inc_id,
-            "type": incident_type,
-            "scale": scale_extent,
-            "format": format_layout,
-            "bound_compass": bound_compass,
-            "extracted_roads": extracted_roads,
-            "primary_location": location_en,
-            "near_landmark": landmark_en,
-            "between_landmark": between_en,
-            "details": content_en,
-            "active_text_block": active_text_block
-        }
+            # Parse Incident Type for this sub-clause
+            incident_type = "General Alert"
+            if any(kw in active_text_block for kw in ["ACCIDENT", "COLLISION", "CAR CRASH"]): incident_type = "Accident"
+            elif any(kw in active_text_block for kw in ["ROAD WORKS", "ROADWORKS", "MAINTENANCE", "REPAIR"]): incident_type = "Road Works"
+            elif any(kw in active_text_block for kw in ["TRAFFIC QUEUE", "CONGESTION", "BUSY", "SLOW TRAFFIC"]): incident_type = "Congestion"
+            elif any(kw in active_text_block for kw in ["CLOSED", "POLICE INVESTIGATION", "BLOCKAGE"]): incident_type = "Road Closure"
+
+            # Parse Scale / Severity status metrics for this sub-clause
+            scale_extent = "Minor"
+            if any(kw in localized_clause for kw in ["ALL LANES CLOSED", "SERIOUS", "COMPLETELY BLOCKED", "FATAL"]): scale_extent = "Major"
+            elif any(kw in localized_clause for kw in ["PART OF THE LANES", "PART OF LANES", "SLOW TRAFFIC", "BUSY", "QUEUE"]): scale_extent = "Moderate"
+
+            # Parse Format Layout configuration constraints matching this sub-clause text context
+            format_layout = "GENERAL"
+            if location_en == "BUSY ROAD SECTIONS": format_layout = "BROADCAST"
+            elif "JUNCTION" in localized_clause or any(kw in localized_clause for kw in ["AND", "CORNER OF"]): format_layout = "JUNCTION"
+            elif "BETWEEN" in localized_clause: format_layout = "BETWEEN"
+            elif "NEAR" in localized_clause: format_layout = "NEAR"
+
+            # Parse Localized Compass Target Direction flags
+            bound_compass = None
+            if any(kw in localized_clause for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL", "TUEN MUN BOUND", "YUEN LONG BOUND", "TSUEN WAN BOUND"]): bound_compass = "WEST"
+            elif any(kw in localized_clause for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN", "SAI KUNG BOUND", "MA ON SHAN BOUND", "TAI PO BOUND"]): bound_compass = "EAST"
+            elif any(kw in localized_clause for kw in ["SOUTH BOUND", "SOUTHBOUND", "ABERDEEN BOUND", "STANLEY BOUND", "REPULSE BAY BOUND", "WONG CHUK HANG BOUND"]): bound_compass = "SOUTH"
+            elif any(kw in localized_clause for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR", "SHATIN BOUND", "SHA TIN BOUND", "FANLING BOUND", "SHEUNG SHUI BOUND", "KWUN TONG BOUND"]): bound_compass = "NORTH"
+
+            # Generate a new virtual sub-case key identifier to display rows separately
+            sub_case_id = f"{inc_id}_{idx + 1}"
+            
+            sub_cases_payloads.append({
+                "sub_case_id": sub_case_id,
+                "parent_id": inc_id,
+                "type": incident_type,
+                "scale": scale_extent,
+                "format": format_layout,
+                "bound_compass": bound_compass,
+                "target_road": mention["name"],
+                "primary_location": mention["name"] if location_en == "BUSY ROAD SECTIONS" else location_en,
+                "details": raw_localized_clause_en if len(raw_localized_clause_en) > 10 else content_en,
+                "localized_clause_text": localized_clause
+            })
+            
+        return sub_cases_payloads
 
     # =========================================================================
     # PART 1B: THE GEOSPATIAL PROCESSING ENGINE (SPATIAL ROUTING PIPELINE)
     # =========================================================================
-    def execute_geospatial_processing(self, nlp_payload):
-        """Processes geometries using explicit intersection topology lookups and trajectory validation."""
-        if not nlp_payload or not nlp_payload["extracted_roads"]:
+    def execute_geospatial_processing(self, sub_case_payload):
+        """Processes geometry operations matching the parameters of a single sub-case profile."""
+        if not sub_case_payload:
             return None
 
-        # Discover Travel Direction database attributes
         dir_col = None
         for col in self.road_df.columns:
             if any(k in col for k in ['TRAVEL', 'DIR', 'TRAFFIC']):
                 dir_col = col
                 break
 
-        # Dynamic Environment CRS Axis-Info Evaluation
         is_northing_first = False
         if self.road_df.crs and hasattr(self.road_df.crs, 'axis_info'):
             try:
@@ -223,135 +242,122 @@ class TrafficIncidentEngine:
 
         output_geometry = None
         spatial_features = []
+        target_road_name = sub_case_payload["target_road"]
+        
+        r_segments = self.road_df[self.road_df['STREET_ENAME'] == target_road_name]
+        if r_segments.empty:
+            return None
+            
+        filtered_segments = filter_segments(r_segments, sub_case_payload["bound_compass"])
+        target_road_geom = filtered_segments.geometry.unary_union
 
-        # DETERMINISTIC LINK-NODE TOPOLOGY JUNCTION ROUTER
-        if nlp_payload["format"] == "JUNCTION" and len(nlp_payload["extracted_roads"]) >= 2:
-            road_a_name = nlp_payload["extracted_roads"][0]
-            road_b_name = nlp_payload["extracted_roads"][1]
+        # Format 1: Junction Node Layout Router using explicit Topology lookups
+        if sub_case_payload["format"] == "JUNCTION":
+            cross_road_name = None
+            for road_name in self.road_names_cache:
+                if road_name != target_road_name and road_name in sub_case_payload["localized_clause_text"]:
+                    cross_road_name = road_name
+                    break
             
-            road_a_df = self.road_df[self.road_df['STREET_ENAME'] == road_a_name]
-            road_b_df = self.road_df[self.road_df['STREET_ENAME'] == road_b_name]
-            
-            if not road_a_df.empty and not road_b_df.empty and not self.intersection_df.empty:
-                route_ids_a = set(road_a_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
-                route_ids_b = set(road_b_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
-                
-                rd_cols = [c for c in self.intersection_df.columns if c.startswith('RD_ID_')]
-                
-                for idx, node_row in self.intersection_df.iterrows():
-                    node_links = set()
-                    for col in rd_cols:
-                        if pd.notna(node_row[col]):
-                            node_links.add(str(node_row[col]).split('.')[0])
+            if cross_road_name:
+                road_b_df = self.road_df[self.road_df['STREET_ENAME'] == cross_road_name]
+                if not road_b_df.empty and not self.intersection_df.empty:
+                    route_ids_a = set(filtered_segments['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
+                    route_ids_b = set(road_b_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
+                    rd_cols = [c for c in self.intersection_df.columns if c.startswith('RD_ID_')]
                     
-                    if node_links.intersection(route_ids_a) and node_links.intersection(route_ids_b):
-                        output_geometry = node_row['GEOMETRY']
-                        break
-                
-                if output_geometry is None:
-                    name_matches = self.intersection_df[
-                        self.intersection_df['INT_ENAME'].str.contains(road_a_name, na=False) &
-                        self.intersection_df['INT_ENAME'].str.contains(road_b_name, na=False)
-                    ]
-                    if not name_matches.empty:
-                        output_geometry = name_matches.iloc[0]['GEOMETRY']
+                    for idx, node_row in self.intersection_df.iterrows():
+                        node_links = set()
+                        for col in rd_cols:
+                            if pd.notna(node_row[col]): node_links.add(str(node_row[col]).split('.')[0])
+                        if node_links.intersection(route_ids_a) and node_links.intersection(route_ids_b):
+                            output_geometry = node_row['GEOMETRY']
+                            break
 
-            if output_geometry is None and not road_a_df.empty and not road_b_df.empty:
-                geom_a = road_a_df.geometry.unary_union
-                geom_b = road_b_df.geometry.unary_union
-                intersection = geom_a.intersection(geom_b)
-                output_geometry = intersection.centroid if not intersection.is_empty else nearest_points(geom_a, geom_b)[0]
-                
+                if output_geometry is None and not road_b_df.empty:
+                    geom_b = road_b_df.geometry.unary_union
+                    intersection = target_road_geom.intersection(geom_b)
+                    output_geometry = intersection.centroid if not intersection.is_empty else nearest_points(target_road_geom, geom_b)[0]
+
             if output_geometry:
                 spatial_features.append({
                     "type": "Feature",
                     "geometry": mapping(output_geometry),
                     "properties": {
-                        "IncidentID": nlp_payload["incident_id"],
-                        "RoadName": road_a_name,
+                        "IncidentID": sub_case_payload["sub_case_id"],
+                        "RoadName": target_road_name,
                         "RouteID": "INTERSECTION_NODE"
                     }
                 })
-
-        # Format 2: Continuous Line Segment Layouts (Near, Between, Broadcast, General)
-        else:
-            combined_gdf_list = []
-            for r_name in nlp_payload["extracted_roads"]:
-                r_segments = self.road_df[self.road_df['STREET_ENAME'] == r_name]
-                if not r_segments.empty:
-                    filtered_segments = filter_segments(r_segments, nlp_payload["bound_compass"])
-                    combined_gdf_list.append(filtered_segments)
-                    
-            if combined_gdf_list:
-                merged_roads_gdf = pd.concat(combined_gdf_list)
-                target_road_geom = merged_roads_gdf.geometry.unary_union
                 
-                pts_context = []
-                if nlp_payload["near_landmark"] in self.landmark_cache:
-                    pts_context.append(self.landmark_cache[nlp_payload["near_landmark"]])
-                if nlp_payload["between_landmark"] in self.landmark_cache:
-                    pts_context.append(self.landmark_cache[nlp_payload["between_landmark"]])
+        # Format 2: Segment Length Layouts (Near, Between, Broadcast, General)
+        if not spatial_features:
+            pts_context = []
+            
+            # Scan for landmark markers inside the database mapping parameters
+            for landmark_key, landmark_pt in self.landmark_cache.items():
+                if landmark_key in sub_case_payload["localized_clause_text"]:
+                    pts_context.append(landmark_pt)
                     
-                for cross_road in self.road_names_cache:
-                    if cross_road in nlp_payload["extracted_roads"]: continue
-                    if cross_road in nlp_payload["active_text_block"]:
-                        cross_feats = self.road_df[self.road_df['STREET_ENAME'] == cross_road]
-                        if not cross_feats.empty:
-                            cross_geom = cross_feats.geometry.unary_union
-                            intersection = target_road_geom.intersection(cross_geom)
-                            pts_context.append(intersection.centroid if not intersection.is_empty else nearest_points(target_road_geom, cross_geom)[0])
+            # Scan for intersecting street boundaries inside the clause text window
+            for cross_road in self.road_names_cache:
+                if cross_road == target_road_name: continue
+                if cross_road in sub_case_payload["localized_clause_text"]:
+                    cross_feats = self.road_df[self.road_df['STREET_ENAME'] == cross_road]
+                    if not cross_feats.empty:
+                        cross_geom = cross_feats.geometry.unary_union
+                        intersection = target_road_geom.intersection(cross_geom)
+                        pts_context.append(intersection.centroid if not intersection.is_empty else nearest_points(target_road_geom, cross_geom)[0])
 
-                buffers = []
-                if nlp_payload["format"] == "BETWEEN" and len(pts_context) >= 2:
-                    buffers = [MultiPoint(pts_context).envelope.buffer(40)]
-                elif pts_context:
-                    buffers = [pt.buffer(self.distance_threshold) for pt in pts_context]
+            buffers = []
+            if sub_case_payload["format"] == "BETWEEN" and len(pts_context) >= 2:
+                buffers = [MultiPoint(pts_context).envelope.buffer(40)]
+            elif pts_context:
+                buffers = [pt.buffer(self.distance_threshold) for pt in pts_context]
 
-                is_queueing = "TRAFFIC QUEUE" in nlp_payload["active_text_block"]
+            is_queueing = "TRAFFIC QUEUE" in sub_case_payload["localized_clause_text"]
 
-                for _, row in merged_roads_gdf.iterrows():
-                    geom = row['GEOMETRY']
-                    if geom is None: continue
-                    
-                    if not buffers or is_queueing or nlp_payload["format"] == "BROADCAST":
+            for _, row in filtered_segments.iterrows():
+                geom = row['GEOMETRY']
+                if geom is None: continue
+                
+                if not buffers or is_queueing or sub_case_payload["format"] == "BROADCAST":
+                    spatial_features.append({
+                        "type": "Feature",
+                        "geometry": mapping(geom),
+                        "properties": {
+                            "IncidentID": sub_case_payload["sub_case_id"],
+                            "RoadName": target_road_name,
+                            "RouteID": str(row.get('ROUTE_ID', 'UNKNOWN'))
+                        }
+                    })
+                else:
+                    if any(geom.intersects(buf) for buf in buffers):
                         spatial_features.append({
                             "type": "Feature",
                             "geometry": mapping(geom),
                             "properties": {
-                                "IncidentID": nlp_payload["incident_id"],
-                                "RoadName": row.get('STREET_ENAME', 'UNKNOWN'),
+                                "IncidentID": sub_case_payload["sub_case_id"],
+                                "RoadName": target_road_name,
                                 "RouteID": str(row.get('ROUTE_ID', 'UNKNOWN'))
                             }
                         })
-                    else:
-                        if any(geom.intersects(buf) for buf in buffers):
-                            spatial_features.append({
-                                "type": "Feature",
-                                "geometry": mapping(geom),
-                                "properties": {
-                                    "IncidentID": nlp_payload["incident_id"],
-                                    "RoadName": row.get('STREET_ENAME', 'UNKNOWN'),
-                                    "RouteID": str(row.get('ROUTE_ID', 'UNKNOWN'))
-                                }
-                            })
 
         if not spatial_features:
             return None
 
-        # Task B3: Structure final configurations into a standardized exchange dictionary
-        spatial_json_payload = {
-            "incident_id": nlp_payload["incident_id"],
-            "type": nlp_payload["type"],
-            "scale": nlp_payload["scale"],
-            "format": nlp_payload["format"],
-            "location_text": nlp_payload["primary_location"],
-            "details": nlp_payload["details"],
+        return {
+            "incident_id": sub_case_payload["sub_case_id"],
+            "type": sub_case_payload["type"],
+            "scale": sub_case_payload["scale"],
+            "format": sub_case_payload["format"],
+            "location_text": f"{target_road_name} ({sub_case_payload['bound_compass'] or 'General'} Bound)" if sub_case_payload["bound_compass"] else target_road_name,
+            "details": sub_case_payload["details"],
             "geojson": {
                 "type": "FeatureCollection",
                 "features": spatial_features
             }
         }
-        return spatial_json_payload
 
     def process_active_incidents(self):
         """Unified runner script coordinating Part 1A and Part 1B pipelines."""
@@ -373,23 +379,24 @@ class TrafficIncidentEngine:
             except: continue
             if message_element is None: continue
 
-            # Run Part 1a Pipeline: Language Entity Processing
-            nlp_payload = self.analyze_incident_language(message_element)
-            if not nlp_payload: continue
-
-            # Run Part 1b Pipeline: Geospatial Routing Engine
-            spatial_output = self.execute_geospatial_processing(nlp_payload)
-            if not spatial_output: continue
-
-            incident_records.append({
-                'IncidentID': spatial_output["incident_id"],
-                'Category': spatial_output["type"],
-                'Scale': spatial_output["scale"],
-                'Location': spatial_output["location_text"],
-                'Details': spatial_output["details"]
-            })
+            # 🎯 RUN PART 1A EXPLODER: Divides 1 message into an array of sub-cases
+            sub_cases = self.explode_and_analyze_message(message_element)
             
-            master_spatial_features.extend(spatial_output["geojson"]["features"])
+            # Process each individual separated sub-case completely independently
+            for sub_case in sub_cases:
+                # Run Part 1b Pipeline: Geospatial Routing Engine
+                spatial_output = self.execute_geospatial_processing(sub_case)
+                if not spatial_output: continue
+
+                incident_records.append({
+                    'IncidentID': spatial_output["incident_id"],
+                    'Category': spatial_output["type"],
+                    'Scale': spatial_output["scale"],
+                    'Location': spatial_output["location_text"],
+                    'Details': spatial_output["details"]
+                })
+                
+                master_spatial_features.extend(spatial_output["geojson"]["features"])
 
         df_incidents = pd.DataFrame(incident_records).drop_duplicates(subset=['IncidentID'])
         
