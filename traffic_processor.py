@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 import re
 import json
 import pandas as pd
-import gpd = geopandas as gpd
+import geopandas as gpd  # 🎯 FIXED SYNTAX TYPO HERE
 from shapely.geometry import Point, MultiPoint, shape, mapping
 from shapely.ops import nearest_points
 
@@ -396,7 +396,6 @@ class TrafficIncidentEngine:
         if master_spatial_features:
             features_gdf_list = []
             for feat in master_spatial_features:
-                # 🎯 THE FIX: Use Shapely's shape() function to translate dictionaries directly into geometries natively
                 geom_obj = shape(feat["geometry"])
                 features_gdf_list.append({
                     'IncidentID': feat["properties"]["IncidentID"],
