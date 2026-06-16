@@ -46,20 +46,22 @@ st.title("Traffic News Visualization for Hong Kong Island")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Inside app.py
+
 @st.cache_data
 def run_spatial_processing_pipeline():
-    # 🎯 Safeguard: Explicitly calculate the absolute base directory
+    # 🎯 FIX 1: Explicitly import 'os' inside the cached scope
     import os
+    
+    # 🎯 FIX 2: Explicitly calculate the absolute base directory path
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
-    # Instantiate the updated intersection-graph engine using strict keywords
+    # Instantiate the engine safely with clean keyword alignment
     engine = TrafficIncidentEngine(
         road_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_centerline.zip"),
         boundary_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_boundary.zip"),
         building_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_building.zip"),
         xml_path=os.path.join(BASE_DIR, "combined.xml"),
-        intersection_path=os.path.join(BASE_DIR, "hki_intersection.geojson"), # Added to align with the new 2-part engine
+        intersection_path=os.path.join(BASE_DIR, "hki_intersection.geojson"), # Handled by the new 2-part engine
         distance_threshold=500
     )
     return engine.process_active_incidents()
