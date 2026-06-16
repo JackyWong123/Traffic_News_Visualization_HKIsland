@@ -96,7 +96,8 @@ class TrafficIncidentEngine:
         if status == "CLOSED" or not location_en:
             return []
             
-        active_text_block = content_upper.split("RESUMED NORMAL")[0]
+        # 🎯 THE FIX: Do NOT split or truncate the text at "RESUMED NORMAL". Scan the entire text window.
+        active_text_block = content_upper 
         
         # Discover where roads appear chronologically inside the text block
         road_mentions = []
@@ -115,7 +116,7 @@ class TrafficIncidentEngine:
         # Sort road mentions chronologically by their character position index in the text
         road_mentions = sorted(road_mentions, key=lambda x: x["start"])
         
-        # 🎯 FIX STEP 1: Filter out nested substrings (e.g., prevent 'Hill Road' from hijacking 'Hammer Hill Road')
+        # Filter out nested substrings (e.g., prevent 'Hill Road' from hijacking 'Hammer Hill Road')
         clean_mentions = []
         for i, current in enumerate(road_mentions):
             is_sub_match = False
@@ -126,7 +127,6 @@ class TrafficIncidentEngine:
             if not is_sub_match:
                 clean_mentions.append(current)
 
-        # 🎯 FIX STEP 2: Character-slice the text into isolated sub-case clauses
         sub_cases_payloads = []
         for idx, mention in enumerate(clean_mentions):
             slice_start = mention["start"]
@@ -143,7 +143,7 @@ class TrafficIncidentEngine:
                 localized_clause = prefix_context + " " + localized_clause
                 raw_localized_clause_en = content_en[:slice_start] + " " + raw_localized_clause_en
 
-            # Parse Incident Type for this sub-clause
+            # Parse Incident Type for this sub-clause dynamically
             incident_type = "General Alert"
             if any(kw in active_text_block for kw in ["ACCIDENT", "COLLISION", "CAR CRASH"]): incident_type = "Accident"
             elif any(kw in active_text_block for kw in ["ROAD WORKS", "ROADWORKS", "MAINTENANCE", "REPAIR"]): incident_type = "Road Works"
@@ -165,12 +165,15 @@ class TrafficIncidentEngine:
             # Parse Localized Compass Target Direction flags
             bound_compass = None
             if any(kw in localized_clause for kw in ["WEST BOUND", "WESTBOUND", "CENTRAL BOUND", "CENTRAL-BOUND", "KENNEDY TOWN BOUND", "SHEUNG WAN BOUND", "TO CENTRAL", "TUEN MUN BOUND", "YUEN LONG BOUND", "TSUEN WAN BOUND"]): bound_compass = "WEST"
-            elif any(kw in localized_clause for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN", "SAI KUNG BOUND", "MA ON SHAN BOUND", "TAI PO BOUND"]): bound_compass = "EAST"
+            elif any(kw in localized_clause for kw in ["EAST BOUND", "EASTBOUND", "CHAI WAN BOUND", "EASTERN BOUND", "CAUSEWAY BAY BOUND", "QUARRY BAY BOUND", "NORTH POINT BOUND", "TO CHAI WAN", "SAI KUNG BOUND", "MA ON SHAN BOUND", "TAI PO BOUND", "CROSS HARBOUR TUNNEL BOUND"]): bound_compass = "EAST"
             elif any(kw in localized_clause for kw in ["SOUTH BOUND", "SOUTHBOUND", "ABERDEEN BOUND", "STANLEY BOUND", "REPULSE BAY BOUND", "WONG CHUK HANG BOUND"]): bound_compass = "SOUTH"
             elif any(kw in localized_clause for kw in ["NORTH BOUND", "NORTHBOUND", "KOWLOON BOUND", "CROSS HARBOUR", "SHATIN BOUND", "SHA TIN BOUND", "FANLING BOUND", "SHEUNG SHUI BOUND", "KWUN TONG BOUND"]): bound_compass = "NORTH"
 
-            # Generate a new virtual sub-case key identifier to display rows separately
-            sub_case_id = f"{inc_id}_{idx + 1}"
+            # 🎯 THE FIX: Suffix the case ID with an explicit sub-incident flag if multi-containing news triggers
+            if len(clean_mentions) > 1:
+                sub_case_id = f"{inc_id}-{idx + 1}"
+            else:
+                sub_case_id = inc_id # Maintain perfect backward compatibility for single-incident logs
             
             sub_cases_payloads.append({
                 "sub_case_id": sub_case_id,
@@ -379,7 +382,7 @@ class TrafficIncidentEngine:
             except: continue
             if message_element is None: continue
 
-            # 🎯 RUN PART 1A EXPLODER: Divides 1 message into an array of sub-cases
+            # RUN PART 1A EXPLODER: Divides 1 message into an array of sub-cases
             sub_cases = self.explode_and_analyze_message(message_element)
             
             # Process each individual separated sub-case completely independently
