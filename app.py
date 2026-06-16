@@ -46,6 +46,7 @@ st.title("Traffic News Visualization for Hong Kong Island")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Inside app.py
 @st.cache_data
 def run_spatial_processing_pipeline():
     engine = TrafficIncidentEngine(
@@ -53,6 +54,7 @@ def run_spatial_processing_pipeline():
         boundary_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_boundary.zip"),
         building_path=os.path.join(BASE_DIR, "iG1000_HKI_FGDB", "hki_building.zip"),
         xml_path=os.path.join(BASE_DIR, "combined.xml"),
+        intersection_path=os.path.join(BASE_DIR, "hki_intersection.geojson"), # Link to dataset here
         distance_threshold=500
     )
     return engine.process_active_incidents()
