@@ -29,14 +29,26 @@ class TrafficIncidentEngine:
         building_df = gpd.read_file(f"zip://{self.building_path}") 
         
         # Load the network intersection geojson node map dataset
+        # Load the network intersection geojson node map dataset
         try:
-            self.intersection_df = gpd.read_file(self.intersection_path)
+            import os
+            # Ensure it resolves the path relative to this script safely
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            full_intersection_path = os.path.join(base_dir, self.intersection_path)
+            
+            self.intersection_df = gpd.read_file(full_intersection_path)
             self.intersection_df.columns = self.intersection_df.columns.str.upper()
             self.intersection_df = self.intersection_df.set_geometry("GEOMETRY").set_crs(epsg=2326, allow_override=True)
         except Exception as e:
-            # Create an empty matching fallback placeholder if file path fails to stream
-            self.intersection_df = gpd.GeoDataFrame(columns=['GEOMETRY', 'INT_ENAME'], crs=2326)
-
+            # 🎯 FIX: Print the exact issue to your Streamlit Cloud logs so you can see why it failed
+            print(f"⚠️ Warning: Could not load intersection layer from {self.intersection_path}. Reason: {e}")
+            
+            # 🎯 FIX: Explicitly set geometry='GEOMETRY' to satisfy the GeoPandas initializer rules
+            self.intersection_df = gpd.GeoDataFrame(
+                columns=['GEOMETRY', 'INT_ENAME'], 
+                crs=2326, 
+                geometry='GEOMETRY'
+            )
         self.road_df.columns = self.road_df.columns.str.upper()
         boundary_df.columns = boundary_df.columns.str.upper()
         building_df.columns = building_df.columns.str.upper()
