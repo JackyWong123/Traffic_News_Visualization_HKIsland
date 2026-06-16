@@ -3,8 +3,8 @@ import xml.etree.ElementTree as ET
 import re
 import json
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point, MultiPoint, mapping
+import gpd = geopandas as gpd
+from shapely.geometry import Point, MultiPoint, shape, mapping
 from shapely.ops import nearest_points
 
 class TrafficIncidentEngine:
@@ -13,7 +13,6 @@ class TrafficIncidentEngine:
         self.boundary_path = boundary_path
         self.building_path = building_path  
         self.xml_path = xml_path
-        # Allow optional or mandatory tracking for the new intersection file layer
         self.intersection_path = intersection_path or "hki_intersection.geojson"
         self.distance_threshold = distance_threshold
         
@@ -29,10 +28,8 @@ class TrafficIncidentEngine:
         building_df = gpd.read_file(f"zip://{self.building_path}") 
         
         # Load the network intersection geojson node map dataset
-        # Load the network intersection geojson node map dataset
         try:
             import os
-            # Ensure it resolves the path relative to this script safely
             base_dir = os.path.dirname(os.path.abspath(__file__))
             full_intersection_path = os.path.join(base_dir, self.intersection_path)
             
@@ -40,15 +37,13 @@ class TrafficIncidentEngine:
             self.intersection_df.columns = self.intersection_df.columns.str.upper()
             self.intersection_df = self.intersection_df.set_geometry("GEOMETRY").set_crs(epsg=2326, allow_override=True)
         except Exception as e:
-            # 🎯 FIX: Print the exact issue to your Streamlit Cloud logs so you can see why it failed
             print(f"⚠️ Warning: Could not load intersection layer from {self.intersection_path}. Reason: {e}")
-            
-            # 🎯 FIX: Explicitly set geometry='GEOMETRY' to satisfy the GeoPandas initializer rules
             self.intersection_df = gpd.GeoDataFrame(
                 columns=['GEOMETRY', 'INT_ENAME'], 
                 crs=2326, 
                 geometry='GEOMETRY'
             )
+
         self.road_df.columns = self.road_df.columns.str.upper()
         boundary_df.columns = boundary_df.columns.str.upper()
         building_df.columns = building_df.columns.str.upper()
@@ -229,38 +224,30 @@ class TrafficIncidentEngine:
         output_geometry = None
         spatial_features = []
 
-        # =====================================================================
-        # OPTIMIZED TASK B1: DETERMINISTIC LINK-NODE TOPOLOGY JUNCTION ROUTER
-        # =====================================================================
+        # DETERMINISTIC LINK-NODE TOPOLOGY JUNCTION ROUTER
         if nlp_payload["format"] == "JUNCTION" and len(nlp_payload["extracted_roads"]) >= 2:
             road_a_name = nlp_payload["extracted_roads"][0]
             road_b_name = nlp_payload["extracted_roads"][1]
             
-            # Isolate candidate spatial edge sequences from database logs
             road_a_df = self.road_df[self.road_df['STREET_ENAME'] == road_a_name]
             road_b_df = self.road_df[self.road_df['STREET_ENAME'] == road_b_name]
             
             if not road_a_df.empty and not road_b_df.empty and not self.intersection_df.empty:
-                # Compile candidate component unique Link ID keys
                 route_ids_a = set(road_a_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
                 route_ids_b = set(road_b_df['ROUTE_ID'].dropna().astype(str).str.split('.').str[0])
                 
-                # Scan for connection keys inside connection properties columns
                 rd_cols = [c for c in self.intersection_df.columns if c.startswith('RD_ID_')]
                 
-                # Method A: Top-tier verification loop matches explicit relational IDs
                 for idx, node_row in self.intersection_df.iterrows():
                     node_links = set()
                     for col in rd_cols:
                         if pd.notna(node_row[col]):
                             node_links.add(str(node_row[col]).split('.')[0])
                     
-                    # Graph Validation: Node links must connect with both road sets simultaneously
                     if node_links.intersection(route_ids_a) and node_links.intersection(route_ids_b):
                         output_geometry = node_row['GEOMETRY']
                         break
                 
-                # Method B: Secondary fallback filters node via direct street name text
                 if output_geometry is None:
                     name_matches = self.intersection_df[
                         self.intersection_df['INT_ENAME'].str.contains(road_a_name, na=False) &
@@ -269,7 +256,6 @@ class TrafficIncidentEngine:
                     if not name_matches.empty:
                         output_geometry = name_matches.iloc[0]['GEOMETRY']
 
-            # Method C: Ultimate geometric calculation fallback to safeguard data pipeline
             if output_geometry is None and not road_a_df.empty and not road_b_df.empty:
                 geom_a = road_a_df.geometry.unary_union
                 geom_b = road_b_df.geometry.unary_union
@@ -410,7 +396,8 @@ class TrafficIncidentEngine:
         if master_spatial_features:
             features_gdf_list = []
             for feat in master_spatial_features:
-                geom_obj = Point(feat["geometry"]["coordinates"]) if feat["geometry"]["type"] == "Point" else gpd.GeoSeries.from_geojson(json.dumps(feat["geometry"])).iloc[0]
+                # 🎯 THE FIX: Use Shapely's shape() function to translate dictionaries directly into geometries natively
+                geom_obj = shape(feat["geometry"])
                 features_gdf_list.append({
                     'IncidentID': feat["properties"]["IncidentID"],
                     'RoadName': feat["properties"]["RoadName"],
